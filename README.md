@@ -11,6 +11,12 @@ backend/
 
 The Spring Boot backend is in `backend/`.
 
+## Start PostgreSQL
+
+```bash
+docker compose up -d postgres
+```
+
 ## Run Backend
 
 ```bash
