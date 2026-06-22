@@ -10,6 +10,7 @@ backend/
 ```
 
 The Spring Boot backend is in `backend/`.
+The React frontend is in `frontend/`.
 
 ## Start PostgreSQL
 
@@ -22,4 +23,18 @@ docker compose up -d postgres
 ```bash
 cd backend
 ./gradlew bootRun
+```
+
+## Run Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The frontend starts on:
+
+```text
+http://localhost:5173
 ```
