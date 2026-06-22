@@ -60,3 +60,32 @@ Transform software repositories into a searchable knowledge base where developer
 ## Long-Term Goal
 
 Build a centralized AI knowledge layer for software development that allows engineers to interact with codebases as easily as searching the web.
+
+## Structure
+
+    frontend/
+    backend/
+
+The Spring Boot backend is in `backend/`.
+The React frontend is in `frontend/`.
+
+## Local Development
+
+### Start PostgreSQL
+
+    docker compose up -d postgres
+
+### Run Backend
+
+    cd backend
+    ./gradlew bootRun
+
+### Run Frontend
+
+    cd frontend
+    npm install
+    npm run dev
+
+The frontend starts on:
+
+    http://localhost:5173
