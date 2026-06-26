@@ -3,8 +3,11 @@ package com.codebasemanager.repositoryscan;
 import com.codebasemanager.repositoryscan.dto.ParseGitHubRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryResponse;
+import com.codebasemanager.repositoryscan.dto.RepositorySummaryResponse;
 import jakarta.validation.Valid;
+import java.util.List;
 import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -24,6 +27,14 @@ public class RepositoryScanController {
 	 */
 	public RepositoryScanController(RepositoryScanService repositoryScanService) {
 		this.repositoryScanService = repositoryScanService;
+	}
+
+	/**
+	 * Lists all repositories stored in the database.
+	 */
+	@GetMapping
+	public List<RepositorySummaryResponse> listRepositories() {
+		return repositoryScanService.listRepositories();
 	}
 
 	/**
