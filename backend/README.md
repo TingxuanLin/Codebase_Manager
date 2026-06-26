@@ -8,6 +8,10 @@ Spring Boot backend service for Codebase Manager.
 - Gradle wrapper included in this repository
 - Docker, for local PostgreSQL
 
+## ERD
+<img width="1536" height="1024" alt="ChatGPT Image Jun 22, 2026, 04_57_15 PM" src="https://github.com/user-attachments/assets/376e7541-4dca-4996-84c0-c3a57f39a6d6" />
+
+
 ## PostgreSQL
 
 From the repository root:
