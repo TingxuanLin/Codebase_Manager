@@ -76,6 +76,17 @@ public class RepositoryScanService {
 	}
 
 	/**
+	 * Deletes a repository row and relies on database cascades for dependent records.
+	 */
+	@Transactional
+	public void deleteRepository(long repositoryId) {
+		int deletedRows = jdbcTemplate.update("DELETE FROM repositories WHERE id = ?", repositoryId);
+		if (deletedRows == 0) {
+			throw new RepositoryScanException("Repository not found: " + repositoryId);
+		}
+	}
+
+	/**
 	 * Persists Git metadata, parsed source files, classes, methods, and metrics.
 	 */
 	@Transactional

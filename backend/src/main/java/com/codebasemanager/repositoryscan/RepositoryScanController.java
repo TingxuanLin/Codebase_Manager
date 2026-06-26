@@ -4,6 +4,8 @@ import com.codebasemanager.repositoryscan.dto.ParseGitHubRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryResponse;
 import jakarta.validation.Valid;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -40,5 +42,14 @@ public class RepositoryScanController {
 	@ResponseStatus(HttpStatus.CREATED)
 	public ParseRepositoryResponse parseGitHubRepository(@Valid @RequestBody ParseGitHubRepositoryRequest request) {
 		return repositoryScanService.parseGitHubAndStore(request);
+	}
+
+	/**
+	 * Deletes a repository and its dependent database records.
+	 */
+	@DeleteMapping("/{repositoryId}")
+	@ResponseStatus(HttpStatus.NO_CONTENT)
+	public void deleteRepository(@PathVariable long repositoryId) {
+		repositoryScanService.deleteRepository(repositoryId);
 	}
 }
