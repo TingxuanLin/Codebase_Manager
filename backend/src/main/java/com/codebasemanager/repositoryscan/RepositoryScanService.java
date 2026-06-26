@@ -3,6 +3,7 @@ package com.codebasemanager.repositoryscan;
 import com.codebasemanager.repositoryscan.dto.ParseGitHubRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryResponse;
+import com.codebasemanager.repositoryscan.dto.GitHubBranchResponse;
 import com.codebasemanager.repositoryscan.dto.RepositorySummaryResponse;
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -108,6 +109,22 @@ public class RepositoryScanService {
 				rs.getInt("file_count"),
 				rs.getInt("class_count"),
 				rs.getInt("method_count")));
+	}
+
+	/**
+	 * Lists all branches available on a remote GitHub repository without cloning it.
+	 */
+	public List<GitHubBranchResponse> listGitHubBranches(String url) {
+		validateGitRepositoryUrl(url);
+		String output = runGitCommand(Path.of("."), List.of("ls-remote", "--heads", url));
+		if (!StringUtils.hasText(output)) {
+			return List.of();
+		}
+		return output.lines()
+				.map(String::strip)
+				.filter(StringUtils::hasText)
+				.map(this::parseGitBranchLine)
+				.toList();
 	}
 
 	/**
@@ -343,6 +360,17 @@ public class RepositoryScanService {
 			Thread.currentThread().interrupt();
 			throw new RepositoryScanException("Git command was interrupted.", ex);
 		}
+	}
+
+	/**
+	 * Parses one git ls-remote branch line into a branch response.
+	 */
+	private GitHubBranchResponse parseGitBranchLine(String line) {
+		String[] parts = line.split("\\s+", 2);
+		if (parts.length != 2 || !parts[1].startsWith("refs/heads/")) {
+			throw new RepositoryScanException("Unexpected git branch output: " + line);
+		}
+		return new GitHubBranchResponse(parts[1].substring("refs/heads/".length()), parts[0]);
 	}
 
 	/**
