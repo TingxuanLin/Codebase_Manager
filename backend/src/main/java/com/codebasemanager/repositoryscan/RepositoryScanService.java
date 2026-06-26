@@ -161,6 +161,24 @@ public class RepositoryScanService {
 	}
 
 	/**
+	 * Deletes one branch and branch-scoped records for a repository.
+	 */
+	@Transactional
+	public void deleteBranch(long repositoryId, long branchId) {
+		jdbcTemplate.update("DELETE FROM source_files WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
+		jdbcTemplate.update("DELETE FROM repository_metrics WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
+		jdbcTemplate.update("DELETE FROM analysis_artifacts WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
+		jdbcTemplate.update("DELETE FROM risk_scores WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
+		int deletedRows = jdbcTemplate.update(
+				"DELETE FROM branches WHERE repository_id = ? AND id = ?",
+				repositoryId,
+				branchId);
+		if (deletedRows == 0) {
+			throw new RepositoryScanException("Branch not found for repository: " + branchId);
+		}
+	}
+
+	/**
 	 * Persists Git metadata, parsed source files, classes, methods, and metrics.
 	 */
 	@Transactional
