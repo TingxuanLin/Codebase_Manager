@@ -3,11 +3,18 @@ package com.codebasemanager.repositoryscan;
 import com.codebasemanager.repositoryscan.dto.ParseGitHubRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryResponse;
+import com.codebasemanager.repositoryscan.dto.GitHubBranchResponse;
+import com.codebasemanager.repositoryscan.dto.RepositorySummaryResponse;
 import jakarta.validation.Valid;
+import java.util.List;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -22,6 +29,22 @@ public class RepositoryScanController {
 	 */
 	public RepositoryScanController(RepositoryScanService repositoryScanService) {
 		this.repositoryScanService = repositoryScanService;
+	}
+
+	/**
+	 * Lists all repositories stored in the database.
+	 */
+	@GetMapping
+	public List<RepositorySummaryResponse> listRepositories() {
+		return repositoryScanService.listRepositories();
+	}
+
+	/**
+	 * Lists all remote branches for a GitHub repository URL before parsing.
+	 */
+	@GetMapping("/github-branches")
+	public List<GitHubBranchResponse> listGitHubBranches(@RequestParam String url) {
+		return repositoryScanService.listGitHubBranches(url);
 	}
 
 	/**
@@ -40,5 +63,14 @@ public class RepositoryScanController {
 	@ResponseStatus(HttpStatus.CREATED)
 	public ParseRepositoryResponse parseGitHubRepository(@Valid @RequestBody ParseGitHubRepositoryRequest request) {
 		return repositoryScanService.parseGitHubAndStore(request);
+	}
+
+	/**
+	 * Deletes a repository and its dependent database records.
+	 */
+	@DeleteMapping("/{repositoryId}")
+	@ResponseStatus(HttpStatus.NO_CONTENT)
+	public void deleteRepository(@PathVariable long repositoryId) {
+		repositoryScanService.deleteRepository(repositoryId);
 	}
 }

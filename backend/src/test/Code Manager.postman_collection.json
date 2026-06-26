@@ -1,0 +1,118 @@
+{
+  "info": {
+    "_postman_id": "a4dfe701-0446-4483-a56a-9e7996d9b974",
+    "name": "Code Manager",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "14363277"
+  },
+  "item": [
+    {
+      "name": "Repo Features",
+      "item": [
+        {
+          "name": "Listing All Repos",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8080/repositories",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "repositories"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Parse a Repo",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"url\": \"https://github.com/TingxuanLin/Codebase_Manager.git\",\n    \"branch\": \"feature/repo-feature\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "http://localhost:8080/repositories/parse-github",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "repositories",
+                "parse-github"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete a Repo",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "http://localhost:8080/repositories/1",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "repositories",
+                "1"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List All Branches",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8080/repositories/github-branches?url=https%3A%2F%2Fgithub.com%2FTingxuanLin%2FCodebase_Manager.git",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "repositories",
+                "github-branches"
+              ],
+              "query": [
+                {
+                  "key": "url",
+                  "value": "https%3A%2F%2Fgithub.com%2FTingxuanLin%2FCodebase_Manager.git"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

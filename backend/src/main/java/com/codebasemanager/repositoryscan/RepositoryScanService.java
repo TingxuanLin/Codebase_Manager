@@ -3,6 +3,8 @@ package com.codebasemanager.repositoryscan;
 import com.codebasemanager.repositoryscan.dto.ParseGitHubRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryResponse;
+import com.codebasemanager.repositoryscan.dto.GitHubBranchResponse;
+import com.codebasemanager.repositoryscan.dto.RepositorySummaryResponse;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -14,6 +16,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.HashMap;
@@ -54,6 +57,77 @@ public class RepositoryScanService {
 	}
 
 	/**
+	 * Lists every stored repository with its latest scan and metrics summary.
+	 */
+	@Transactional(readOnly = true)
+	public List<RepositorySummaryResponse> listRepositories() {
+		return jdbcTemplate.query("""
+				SELECT r.id,
+				       r.name,
+				       r.url,
+				       COUNT(DISTINCT b.id)::int AS branch_count,
+				       latest_branch.name AS latest_branch,
+				       latest_scan.head_commit_sha AS latest_commit_sha,
+				       latest_scan.id AS latest_scan_run_id,
+				       latest_scan.status AS latest_scan_status,
+				       latest_scan.completed_at AS last_scanned_at,
+				       COALESCE(latest_metrics.file_count, 0) AS file_count,
+				       COALESCE(latest_metrics.class_count, 0) AS class_count,
+				       COALESCE(latest_metrics.method_count, 0) AS method_count
+				FROM repositories r
+				LEFT JOIN branches b ON b.repository_id = r.id
+				LEFT JOIN LATERAL (
+				    SELECT sr.*
+				    FROM scan_runs sr
+				    WHERE sr.repository_id = r.id
+				    ORDER BY COALESCE(sr.completed_at, sr.started_at) DESC, sr.id DESC
+				    LIMIT 1
+				) latest_scan ON TRUE
+				LEFT JOIN branches latest_branch ON latest_branch.id = latest_scan.branch_id
+				LEFT JOIN LATERAL (
+				    SELECT rm.file_count, rm.class_count, rm.method_count
+				    FROM repository_metrics rm
+				    WHERE rm.repository_id = r.id
+				      AND rm.branch_id IS NOT DISTINCT FROM latest_scan.branch_id
+				    ORDER BY rm.date DESC, rm.id DESC
+				    LIMIT 1
+				) latest_metrics ON TRUE
+				GROUP BY r.id, latest_branch.name, latest_scan.id, latest_scan.head_commit_sha,
+				         latest_scan.status, latest_scan.completed_at, latest_scan.started_at,
+				         latest_metrics.file_count, latest_metrics.class_count, latest_metrics.method_count
+				ORDER BY COALESCE(latest_scan.completed_at, latest_scan.started_at, r.updated_at) DESC, r.name ASC
+				""", (rs, rowNum) -> new RepositorySummaryResponse(
+				rs.getLong("id"),
+				rs.getString("name"),
+				rs.getString("url"),
+				rs.getInt("branch_count"),
+				rs.getString("latest_branch"),
+				rs.getString("latest_commit_sha"),
+				getNullableLong(rs, "latest_scan_run_id"),
+				rs.getString("latest_scan_status"),
+				rs.getObject("last_scanned_at", OffsetDateTime.class),
+				rs.getInt("file_count"),
+				rs.getInt("class_count"),
+				rs.getInt("method_count")));
+	}
+
+	/**
+	 * Lists all branches available on a remote GitHub repository without cloning it.
+	 */
+	public List<GitHubBranchResponse> listGitHubBranches(String url) {
+		validateGitRepositoryUrl(url);
+		String output = runGitCommand(Path.of("."), List.of("ls-remote", "--heads", url));
+		if (!StringUtils.hasText(output)) {
+			return List.of();
+		}
+		return output.lines()
+				.map(String::strip)
+				.filter(StringUtils::hasText)
+				.map(this::parseGitBranchLine)
+				.toList();
+	}
+
+	/**
 	 * Validates a local Git working tree and stores its parsed repository snapshot.
 	 */
 	@Transactional
@@ -73,6 +147,17 @@ public class RepositoryScanService {
 		Path repoPath = cloneOrUpdateRepository(request.url(), request.branch());
 		String repositoryName = firstNonBlank(request.name(), deriveRepositoryName(request.url(), repoPath));
 		return parseAndStore(new ParseRepositoryRequest(repoPath.toString(), repositoryName, request.url()));
+	}
+
+	/**
+	 * Deletes a repository row and relies on database cascades for dependent records.
+	 */
+	@Transactional
+	public void deleteRepository(long repositoryId) {
+		int deletedRows = jdbcTemplate.update("DELETE FROM repositories WHERE id = ?", repositoryId);
+		if (deletedRows == 0) {
+			throw new RepositoryScanException("Repository not found: " + repositoryId);
+		}
 	}
 
 	/**
@@ -275,6 +360,17 @@ public class RepositoryScanService {
 			Thread.currentThread().interrupt();
 			throw new RepositoryScanException("Git command was interrupted.", ex);
 		}
+	}
+
+	/**
+	 * Parses one git ls-remote branch line into a branch response.
+	 */
+	private GitHubBranchResponse parseGitBranchLine(String line) {
+		String[] parts = line.split("\\s+", 2);
+		if (parts.length != 2 || !parts[1].startsWith("refs/heads/")) {
+			throw new RepositoryScanException("Unexpected git branch output: " + line);
+		}
+		return new GitHubBranchResponse(parts[1].substring("refs/heads/".length()), parts[0]);
 	}
 
 	/**
@@ -671,6 +767,14 @@ public class RepositoryScanService {
 		catch (EmptyResultDataAccessException ex) {
 			throw new RepositoryScanException("Database did not return an id.", ex);
 		}
+	}
+
+	/**
+	 * Reads a nullable BIGINT column without converting null to zero.
+	 */
+	private Long getNullableLong(java.sql.ResultSet rs, String columnName) throws java.sql.SQLException {
+		long value = rs.getLong(columnName);
+		return rs.wasNull() ? null : value;
 	}
 
 	/**
