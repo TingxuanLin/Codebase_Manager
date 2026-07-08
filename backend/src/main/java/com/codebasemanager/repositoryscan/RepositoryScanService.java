@@ -1,5 +1,7 @@
 package com.codebasemanager.repositoryscan;
 
+import com.codebasemanager.repositoryscan.dto.BranchComparisonResponse;
+import com.codebasemanager.repositoryscan.dto.FileChangeResponse;
 import com.codebasemanager.repositoryscan.dto.ParseGitHubRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryResponse;
@@ -208,6 +210,72 @@ public class RepositoryScanService {
 				WHERE id = ?
 				""", branchId, repositoryId);
 		syncDefaultBranchFlag(repositoryId);
+	}
+
+	/**
+	 * Returns the latest branch scan and its stored file changes against the default branch.
+	 */
+	@Transactional(readOnly = true)
+	public BranchComparisonResponse getBranchComparison(long repositoryId, long branchId) {
+		BranchComparisonMetadata metadata = jdbcTemplate.query("""
+				SELECT sr.id AS scan_run_id,
+				       current_branch.name AS branch,
+				       default_branch.name AS default_branch,
+				       sr.base_commit_sha,
+				       sr.head_commit_sha,
+				       sr.completed_at AS scanned_at
+				FROM scan_runs sr
+				JOIN branches current_branch ON current_branch.repository_id = sr.repository_id
+				    AND current_branch.id = sr.branch_id
+				JOIN repositories repository ON repository.id = sr.repository_id
+				LEFT JOIN branches default_branch ON default_branch.repository_id = repository.id
+				    AND default_branch.id = repository.default_branch_id
+				WHERE sr.repository_id = ?
+				  AND sr.branch_id = ?
+				  AND sr.status = 'completed'
+				ORDER BY COALESCE(sr.completed_at, sr.started_at) DESC, sr.id DESC
+				LIMIT 1
+				""", rs -> {
+			if (!rs.next()) {
+				throw new RepositoryScanException("No completed scan found for branch: " + branchId);
+			}
+			return new BranchComparisonMetadata(
+					rs.getLong("scan_run_id"),
+					rs.getString("branch"),
+					rs.getString("default_branch"),
+					rs.getString("base_commit_sha"),
+					rs.getString("head_commit_sha"),
+					rs.getObject("scanned_at", OffsetDateTime.class));
+		}, repositoryId, branchId);
+
+		List<FileChangeResponse> changes = jdbcTemplate.query("""
+				SELECT path, old_path, change_type, additions, deletions
+				FROM file_changes
+				WHERE scan_run_id = ?
+				ORDER BY path ASC
+				""", (rs, rowNum) -> new FileChangeResponse(
+				rs.getString("path"),
+				rs.getString("old_path"),
+				rs.getString("change_type"),
+				rs.getInt("additions"),
+				rs.getInt("deletions")), metadata.scanRunId());
+
+		int additions = changes.stream().mapToInt(FileChangeResponse::additions).sum();
+		int deletions = changes.stream().mapToInt(FileChangeResponse::deletions).sum();
+
+		return new BranchComparisonResponse(
+				repositoryId,
+				branchId,
+				metadata.scanRunId(),
+				metadata.branch(),
+				metadata.defaultBranch(),
+				metadata.baseCommitSha(),
+				metadata.headCommitSha(),
+				metadata.scannedAt(),
+				changes.size(),
+				additions,
+				deletions,
+				changes);
 	}
 
 	/**
@@ -1039,6 +1107,15 @@ public class RepositoryScanService {
 	}
 
 	private record FileChangeCounts(int additions, int deletions) {
+	}
+
+	private record BranchComparisonMetadata(
+			long scanRunId,
+			String branch,
+			String defaultBranch,
+			String baseCommitSha,
+			String headCommitSha,
+			OffsetDateTime scannedAt) {
 	}
 
 	private static class ParsedClassBuilder {

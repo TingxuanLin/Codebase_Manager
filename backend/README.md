@@ -51,6 +51,7 @@ GET /repositories
 POST /repositories/parse-local
 POST /repositories/parse-github
 PATCH /repositories/{repositoryId}/branches/{branchId}/default
+GET /repositories/{repositoryId}/branches/{branchId}/comparison
 DELETE /repositories/{repositoryId}/branches/{branchId}
 ```
 
@@ -102,6 +103,16 @@ curl -X PATCH http://localhost:8080/repositories/1/branches/2/default
 ```
 
 After that, scans of other branches in the same repository will store `scan_runs.base_commit_sha` from the default branch and persist changed files in `file_changes`.
+
+### Compare Branch With Default
+
+The latest completed scan for a branch can be read with:
+
+```bash
+curl http://localhost:8080/repositories/1/branches/2/comparison
+```
+
+The response includes the default branch name, base and head commit SHAs, total additions/deletions, and changed files.
 
 Supported source file extensions include Java, Kotlin, JavaScript, TypeScript, Python, Go, Ruby, PHP, C#, C/C++, Rust, and Swift.
 
