@@ -10,6 +10,7 @@ public record RepositorySummaryResponse(
 		String name,
 		String url,
 		int branchCount,
+		String defaultBranch,
 		String latestBranch,
 		String latestCommitSha,
 		Long latestScanRunId,

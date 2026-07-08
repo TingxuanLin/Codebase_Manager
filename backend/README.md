@@ -28,7 +28,7 @@ username: codebase_manager
 password: codebase_manager
 ```
 
-The schema in `src/main/resources/db/init.sql` is loaded automatically the first time the Docker volume is created.
+Schema changes are managed by Flyway migrations in `src/main/resources/db/migration` when the backend starts.
 
 ## Run
 
@@ -47,13 +47,18 @@ Useful endpoints:
 ```text
 GET /
 GET /actuator/health
+GET /repositories
 POST /repositories/parse-local
 POST /repositories/parse-github
+PATCH /repositories/{repositoryId}/branches/{branchId}/default
+GET /repositories/{repositoryId}/branches/{branchId}/comparison
+DELETE /repositories/{repositoryId}/branches/{branchId}
 ```
 
 ## Parse and Store a Repository
 
 The parser stores repository, branch, commit, scan run, source file, class, method, and metric rows.
+When a non-default branch is parsed, the scan run is compared against the configured default branch commit and file-level changes are stored in `file_changes`.
 
 ### Local Repository
 
@@ -89,6 +94,26 @@ curl -X POST http://localhost:8080/repositories/parse-github \
 
 For private repositories, configure local Git credentials, SSH keys, or a credential manager for the backend process.
 
+### Set Default Branch
+
+The first scanned branch becomes the default branch automatically. The repository stores that as `repositories.default_branch_id`, while `branches.is_default` is kept synchronized for easy display and filtering. Use this endpoint to change the comparison base, for example to mark `main` as the default after it has been scanned:
+
+```bash
+curl -X PATCH http://localhost:8080/repositories/1/branches/2/default
+```
+
+After that, scans of other branches in the same repository will store `scan_runs.base_commit_sha` from the default branch and persist changed files in `file_changes`.
+
+### Compare Branch With Default
+
+The latest completed scan for a branch can be read with:
+
+```bash
+curl http://localhost:8080/repositories/1/branches/2/comparison
+```
+
+The response includes the default branch name, base and head commit SHAs, total additions/deletions, and changed files.
+
 Supported source file extensions include Java, Kotlin, JavaScript, TypeScript, Python, Go, Ruby, PHP, C#, C/C++, Rust, and Swift.
 
 Configuration lives in:
@@ -100,14 +125,17 @@ src/main/resources/application.yml
 Initial database schema:
 
 ```text
-src/main/resources/db/init.sql
+src/main/resources/db/migration/V1__initial_schema.sql
 ```
 
-To run it manually against an existing PostgreSQL database:
+Add new schema changes as a new migration file:
 
-```bash
-psql "$DATABASE_URL" -f src/main/resources/db/init.sql
+```text
+src/main/resources/db/migration/V2__description.sql
+src/main/resources/db/migration/V3__description.sql
 ```
+
+Do not edit a migration after it has already run locally. Create the next version instead.
 
 ## Test
 

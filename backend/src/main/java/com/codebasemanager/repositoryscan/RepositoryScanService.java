@@ -1,5 +1,7 @@
 package com.codebasemanager.repositoryscan;
 
+import com.codebasemanager.repositoryscan.dto.BranchComparisonResponse;
+import com.codebasemanager.repositoryscan.dto.FileChangeResponse;
 import com.codebasemanager.repositoryscan.dto.ParseGitHubRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryResponse;
@@ -66,6 +68,7 @@ public class RepositoryScanService {
 				       r.name,
 				       r.url,
 				       COUNT(DISTINCT b.id)::int AS branch_count,
+				       default_branch.name AS default_branch,
 				       latest_branch.name AS latest_branch,
 				       latest_scan.head_commit_sha AS latest_commit_sha,
 				       latest_scan.id AS latest_scan_run_id,
@@ -76,6 +79,8 @@ public class RepositoryScanService {
 				       COALESCE(latest_metrics.method_count, 0) AS method_count
 				FROM repositories r
 				LEFT JOIN branches b ON b.repository_id = r.id
+				LEFT JOIN branches default_branch ON default_branch.repository_id = r.id
+				    AND default_branch.id = r.default_branch_id
 				LEFT JOIN LATERAL (
 				    SELECT sr.*
 				    FROM scan_runs sr
@@ -92,7 +97,7 @@ public class RepositoryScanService {
 				    ORDER BY rm.date DESC, rm.id DESC
 				    LIMIT 1
 				) latest_metrics ON TRUE
-				GROUP BY r.id, latest_branch.name, latest_scan.id, latest_scan.head_commit_sha,
+				GROUP BY r.id, default_branch.name, latest_branch.name, latest_scan.id, latest_scan.head_commit_sha,
 				         latest_scan.status, latest_scan.completed_at, latest_scan.started_at,
 				         latest_metrics.file_count, latest_metrics.class_count, latest_metrics.method_count
 				ORDER BY COALESCE(latest_scan.completed_at, latest_scan.started_at, r.updated_at) DESC, r.name ASC
@@ -101,6 +106,7 @@ public class RepositoryScanService {
 				rs.getString("name"),
 				rs.getString("url"),
 				rs.getInt("branch_count"),
+				rs.getString("default_branch"),
 				rs.getString("latest_branch"),
 				rs.getString("latest_commit_sha"),
 				getNullableLong(rs, "latest_scan_run_id"),
@@ -161,6 +167,134 @@ public class RepositoryScanService {
 	}
 
 	/**
+	 * Deletes one branch and branch-scoped records for a repository.
+	 */
+	@Transactional
+	public void deleteBranch(long repositoryId, long branchId) {
+		jdbcTemplate.update("""
+				UPDATE repositories
+				SET default_branch_id = NULL, updated_at = NOW()
+				WHERE id = ? AND default_branch_id = ?
+				""", repositoryId, branchId);
+		jdbcTemplate.update("DELETE FROM source_files WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
+		jdbcTemplate.update("DELETE FROM repository_metrics WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
+		jdbcTemplate.update("DELETE FROM analysis_artifacts WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
+		jdbcTemplate.update("DELETE FROM risk_scores WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
+		int deletedRows = jdbcTemplate.update(
+				"DELETE FROM branches WHERE repository_id = ? AND id = ?",
+				repositoryId,
+				branchId);
+		if (deletedRows == 0) {
+			throw new RepositoryResourceNotFoundException("Branch not found for repository: " + branchId);
+		}
+	}
+
+	/**
+	 * Makes one branch the default branch used as the comparison base.
+	 */
+	@Transactional
+	public void setDefaultBranch(long repositoryId, long branchId) {
+		Integer branchCount = jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM branches WHERE repository_id = ? AND id = ?",
+				Integer.class,
+				repositoryId,
+				branchId);
+		if (branchCount == null || branchCount == 0) {
+			throw new RepositoryResourceNotFoundException("Branch not found for repository: " + branchId);
+		}
+
+		jdbcTemplate.update("UPDATE branches SET is_default = FALSE, updated_at = NOW() WHERE repository_id = ?", repositoryId);
+		jdbcTemplate.update("""
+				UPDATE repositories
+				SET default_branch_id = ?, updated_at = NOW()
+				WHERE id = ?
+				""", branchId, repositoryId);
+		syncDefaultBranchFlag(repositoryId);
+	}
+
+	/**
+	 * Returns the latest branch scan and its stored file changes against the default branch.
+	 */
+	@Transactional(readOnly = true)
+	public BranchComparisonResponse getBranchComparison(long repositoryId, long branchId) {
+		if (!branchExists(repositoryId, branchId)) {
+			throw new RepositoryResourceNotFoundException("Branch not found for repository: " + branchId);
+		}
+
+		BranchComparisonMetadata metadata = jdbcTemplate.query("""
+				SELECT sr.id AS scan_run_id,
+				       current_branch.name AS branch,
+				       default_branch.name AS default_branch,
+				       sr.base_commit_sha,
+				       sr.head_commit_sha,
+				       sr.completed_at AS scanned_at
+				FROM scan_runs sr
+				JOIN branches current_branch ON current_branch.repository_id = sr.repository_id
+				    AND current_branch.id = sr.branch_id
+				JOIN repositories repository ON repository.id = sr.repository_id
+				LEFT JOIN branches default_branch ON default_branch.repository_id = repository.id
+				    AND default_branch.id = repository.default_branch_id
+				WHERE sr.repository_id = ?
+				  AND sr.branch_id = ?
+				  AND sr.status = 'completed'
+				ORDER BY COALESCE(sr.completed_at, sr.started_at) DESC, sr.id DESC
+				LIMIT 1
+				""", rs -> {
+			if (!rs.next()) {
+				throw new RepositoryScanException("No completed scan found for branch: " + branchId);
+			}
+			return new BranchComparisonMetadata(
+					rs.getLong("scan_run_id"),
+					rs.getString("branch"),
+					rs.getString("default_branch"),
+					rs.getString("base_commit_sha"),
+					rs.getString("head_commit_sha"),
+					rs.getObject("scanned_at", OffsetDateTime.class));
+		}, repositoryId, branchId);
+
+		List<FileChangeResponse> changes = jdbcTemplate.query("""
+				SELECT path, old_path, change_type, additions, deletions
+				FROM file_changes
+				WHERE scan_run_id = ?
+				ORDER BY path ASC
+				""", (rs, rowNum) -> new FileChangeResponse(
+				rs.getString("path"),
+				rs.getString("old_path"),
+				rs.getString("change_type"),
+				rs.getInt("additions"),
+				rs.getInt("deletions")), metadata.scanRunId());
+
+		int additions = changes.stream().mapToInt(FileChangeResponse::additions).sum();
+		int deletions = changes.stream().mapToInt(FileChangeResponse::deletions).sum();
+
+		return new BranchComparisonResponse(
+				repositoryId,
+				branchId,
+				metadata.scanRunId(),
+				metadata.branch(),
+				metadata.defaultBranch(),
+				metadata.baseCommitSha(),
+				metadata.headCommitSha(),
+				metadata.scannedAt(),
+				changes.size(),
+				additions,
+				deletions,
+				changes);
+	}
+
+	/**
+	 * Returns whether the repository contains the requested branch row.
+	 */
+	private boolean branchExists(long repositoryId, long branchId) {
+		Integer branchCount = jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM branches WHERE repository_id = ? AND id = ?",
+				Integer.class,
+				repositoryId,
+				branchId);
+		return branchCount != null && branchCount > 0;
+	}
+
+	/**
 	 * Persists Git metadata, parsed source files, classes, methods, and metrics.
 	 */
 	@Transactional
@@ -171,8 +305,10 @@ public class RepositoryScanService {
 		long repositoryId = upsertRepository(repositoryName, repositoryUrl);
 		long commitId = upsertCommit(repositoryId, gitInfo);
 		long branchId = upsertBranch(repositoryId, gitInfo);
+		ensureDefaultBranch(repositoryId, branchId);
 		linkBranchCommit(repositoryId, branchId, commitId);
-		long scanRunId = insertScanRun(repositoryId, branchId, gitInfo.headCommitSha());
+		String baseCommitSha = findComparisonBaseCommitSha(repositoryId, branchId).orElse(null);
+		long scanRunId = insertScanRun(repositoryId, branchId, baseCommitSha, gitInfo.headCommitSha());
 
 		jdbcTemplate.update("DELETE FROM source_files WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
 
@@ -191,6 +327,7 @@ public class RepositoryScanService {
 		}
 
 		upsertRepositoryMetrics(repositoryId, branchId, scanRunId, files.size(), classCount, methodCount);
+		insertFileChanges(repoPath, scanRunId, baseCommitSha, gitInfo.headCommitSha());
 		completeScanRun(scanRunId);
 
 		return new ParseRepositoryResponse(
@@ -664,15 +801,54 @@ public class RepositoryScanService {
 	private long upsertBranch(long repositoryId, GitInfo gitInfo) {
 		return queryForLong("""
 				INSERT INTO branches (repository_id, name, is_default, last_seen_commit_sha, last_scanned_commit_sha)
-				SELECT ?, ?, NOT EXISTS (
-				    SELECT 1 FROM branches WHERE repository_id = ? AND is_default = TRUE
-				), ?, ?
+				VALUES (?, ?, FALSE, ?, ?)
 				ON CONFLICT (repository_id, name) DO UPDATE
 				SET last_seen_commit_sha = EXCLUDED.last_seen_commit_sha,
 				    last_scanned_commit_sha = EXCLUDED.last_scanned_commit_sha,
 				    updated_at = NOW()
 				RETURNING id
-				""", repositoryId, gitInfo.branchName(), repositoryId, gitInfo.headCommitSha(), gitInfo.headCommitSha());
+				""", repositoryId, gitInfo.branchName(), gitInfo.headCommitSha(), gitInfo.headCommitSha());
+	}
+
+	/**
+	 * Ensures every repository has one direct default branch pointer.
+	 */
+	private void ensureDefaultBranch(long repositoryId, long fallbackBranchId) {
+		jdbcTemplate.update("""
+				UPDATE repositories r
+				SET default_branch_id = COALESCE(
+				        (
+				            SELECT b.id
+				            FROM branches b
+				            WHERE b.repository_id = r.id
+				              AND b.is_default = TRUE
+				            ORDER BY b.id
+				            LIMIT 1
+				        ),
+				        ?
+				    ),
+				    updated_at = NOW()
+				WHERE r.id = ?
+				  AND r.default_branch_id IS NULL
+				""", fallbackBranchId, repositoryId);
+		syncDefaultBranchFlag(repositoryId);
+	}
+
+	/**
+	 * Keeps the branch-level default marker aligned with repositories.default_branch_id.
+	 */
+	private void syncDefaultBranchFlag(long repositoryId) {
+		jdbcTemplate.update("""
+				UPDATE branches b
+				SET is_default = (b.id = r.default_branch_id),
+				    updated_at = CASE
+				        WHEN b.is_default IS DISTINCT FROM (b.id = r.default_branch_id) THEN NOW()
+				        ELSE b.updated_at
+				    END
+				FROM repositories r
+				WHERE b.repository_id = r.id
+				  AND r.id = ?
+				""", repositoryId);
 	}
 
 	/**
@@ -689,12 +865,145 @@ public class RepositoryScanService {
 	/**
 	 * Creates a running scan row before source files are stored.
 	 */
-	private long insertScanRun(long repositoryId, long branchId, String headCommitSha) {
+	private long insertScanRun(long repositoryId, long branchId, String baseCommitSha, String headCommitSha) {
 		return queryForLong("""
-				INSERT INTO scan_runs (repository_id, branch_id, head_commit_sha, status, trigger_type)
-				VALUES (?, ?, ?, 'running', 'manual')
+				INSERT INTO scan_runs (repository_id, branch_id, base_commit_sha, head_commit_sha, status, trigger_type)
+				VALUES (?, ?, ?, ?, 'running', 'manual')
 				RETURNING id
-				""", repositoryId, branchId, headCommitSha);
+				""", repositoryId, branchId, baseCommitSha, headCommitSha);
+	}
+
+	/**
+	 * Finds the configured default branch commit when scanning a non-default branch.
+	 */
+	private Optional<String> findComparisonBaseCommitSha(long repositoryId, long branchId) {
+		return jdbcTemplate.query("""
+				SELECT default_branch.last_scanned_commit_sha
+				FROM branches current_branch
+				JOIN repositories repository ON repository.id = current_branch.repository_id
+				JOIN branches default_branch ON default_branch.repository_id = repository.id
+				    AND default_branch.id = repository.default_branch_id
+				WHERE current_branch.repository_id = ?
+				  AND current_branch.id = ?
+				  AND current_branch.id <> repository.default_branch_id
+				  AND default_branch.last_scanned_commit_sha IS NOT NULL
+				""", rs -> rs.next() ? Optional.of(rs.getString("last_scanned_commit_sha")) : Optional.empty(), repositoryId, branchId);
+	}
+
+	/**
+	 * Stores file-level changes for a branch scan compared to the default branch commit.
+	 */
+	private void insertFileChanges(Path repoPath, long scanRunId, String baseCommitSha, String headCommitSha) {
+		if (!StringUtils.hasText(baseCommitSha) || baseCommitSha.equals(headCommitSha)) {
+			return;
+		}
+		if (!gitObjectExists(repoPath, baseCommitSha) || !gitObjectExists(repoPath, headCommitSha)) {
+			return;
+		}
+
+		Map<String, FileChangeCounts> countsByPath = diffCountsByPath(repoPath, baseCommitSha, headCommitSha);
+		for (FileChange change : diffNameStatuses(repoPath, baseCommitSha, headCommitSha)) {
+			FileChangeCounts counts = countsByPath.getOrDefault(change.path(), new FileChangeCounts(0, 0));
+			jdbcTemplate.update("""
+					INSERT INTO file_changes (scan_run_id, path, old_path, change_type, additions, deletions)
+					VALUES (?, ?, ?, ?, ?, ?)
+					ON CONFLICT (scan_run_id, path) DO UPDATE
+					SET old_path = EXCLUDED.old_path,
+					    change_type = EXCLUDED.change_type,
+					    additions = EXCLUDED.additions,
+					    deletions = EXCLUDED.deletions
+					""", scanRunId, change.path(), change.oldPath(), change.changeType(), counts.additions(), counts.deletions());
+		}
+	}
+
+	/**
+	 * Returns whether a commit or tree-ish can be resolved locally.
+	 */
+	private boolean gitObjectExists(Path repoPath, String objectName) {
+		try {
+			runGit(repoPath, "cat-file", "-e", objectName);
+			return true;
+		}
+		catch (RepositoryScanException ex) {
+			return false;
+		}
+	}
+
+	/**
+	 * Parses git numstat output into addition/deletion counts keyed by the new path.
+	 */
+	private Map<String, FileChangeCounts> diffCountsByPath(Path repoPath, String baseCommitSha, String headCommitSha) {
+		String output = runGit(repoPath, "diff", "--numstat", "--find-renames", "--find-copies", baseCommitSha, headCommitSha);
+		Map<String, FileChangeCounts> countsByPath = new HashMap<>();
+		if (!StringUtils.hasText(output)) {
+			return countsByPath;
+		}
+		for (String line : output.lines().toList()) {
+			String[] parts = line.split("\\t");
+			if (parts.length < 3) {
+				continue;
+			}
+			String path = parts[parts.length - 1];
+			countsByPath.put(path, new FileChangeCounts(parseDiffCount(parts[0]), parseDiffCount(parts[1])));
+		}
+		return countsByPath;
+	}
+
+	/**
+	 * Parses git name-status output into file change records.
+	 */
+	private List<FileChange> diffNameStatuses(Path repoPath, String baseCommitSha, String headCommitSha) {
+		String output = runGit(repoPath, "diff", "--name-status", "--find-renames", "--find-copies", baseCommitSha, headCommitSha);
+		if (!StringUtils.hasText(output)) {
+			return List.of();
+		}
+		List<FileChange> changes = new ArrayList<>();
+		for (String line : output.lines().toList()) {
+			String[] parts = line.split("\\t");
+			if (parts.length < 2) {
+				continue;
+			}
+			String status = parts[0];
+			String changeType = changeType(status);
+			if (status.startsWith("R") || status.startsWith("C")) {
+				if (parts.length >= 3) {
+					changes.add(new FileChange(parts[2], parts[1], changeType));
+				}
+			}
+			else {
+				changes.add(new FileChange(parts[1], null, changeType));
+			}
+		}
+		return changes;
+	}
+
+	/**
+	 * Converts git name-status codes into the database change_type values.
+	 */
+	private String changeType(String status) {
+		if (status.startsWith("A")) {
+			return "added";
+		}
+		if (status.startsWith("D")) {
+			return "deleted";
+		}
+		if (status.startsWith("R")) {
+			return "renamed";
+		}
+		if (status.startsWith("C")) {
+			return "copied";
+		}
+		return "modified";
+	}
+
+	/**
+	 * Parses numstat counts, treating binary file markers as zero.
+	 */
+	private int parseDiffCount(String value) {
+		if ("-".equals(value)) {
+			return 0;
+		}
+		return Integer.parseInt(value);
 	}
 
 	/**
@@ -808,6 +1117,21 @@ public class RepositoryScanService {
 	}
 
 	private record ParsedMethod(String name, int loc, int complexity) {
+	}
+
+	private record FileChange(String path, String oldPath, String changeType) {
+	}
+
+	private record FileChangeCounts(int additions, int deletions) {
+	}
+
+	private record BranchComparisonMetadata(
+			long scanRunId,
+			String branch,
+			String defaultBranch,
+			String baseCommitSha,
+			String headCommitSha,
+			OffsetDateTime scannedAt) {
 	}
 
 	private static class ParsedClassBuilder {
