@@ -113,6 +113,79 @@
           "response": []
         }
       ]
+    },
+    {
+      "name": "Branch Features",
+      "item": [
+        {
+          "name": "List Diff Commits",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8080/repositories/8/branches/11/comparison",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "repositories",
+                "8",
+                "branches",
+                "11",
+                "comparison"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete A Branch",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8080/repositories/8/branches/8",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "repositories",
+                "8",
+                "branches",
+                "8"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Set Default Branch",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8080/repositories/8/branches/10/default",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "repositories",
+                "8",
+                "branches",
+                "10",
+                "default"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
     }
   ]
 }

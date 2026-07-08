@@ -185,7 +185,7 @@ public class RepositoryScanService {
 				repositoryId,
 				branchId);
 		if (deletedRows == 0) {
-			throw new RepositoryScanException("Branch not found for repository: " + branchId);
+			throw new RepositoryResourceNotFoundException("Branch not found for repository: " + branchId);
 		}
 	}
 
@@ -200,7 +200,7 @@ public class RepositoryScanService {
 				repositoryId,
 				branchId);
 		if (branchCount == null || branchCount == 0) {
-			throw new RepositoryScanException("Branch not found for repository: " + branchId);
+			throw new RepositoryResourceNotFoundException("Branch not found for repository: " + branchId);
 		}
 
 		jdbcTemplate.update("UPDATE branches SET is_default = FALSE, updated_at = NOW() WHERE repository_id = ?", repositoryId);
@@ -217,6 +217,10 @@ public class RepositoryScanService {
 	 */
 	@Transactional(readOnly = true)
 	public BranchComparisonResponse getBranchComparison(long repositoryId, long branchId) {
+		if (!branchExists(repositoryId, branchId)) {
+			throw new RepositoryResourceNotFoundException("Branch not found for repository: " + branchId);
+		}
+
 		BranchComparisonMetadata metadata = jdbcTemplate.query("""
 				SELECT sr.id AS scan_run_id,
 				       current_branch.name AS branch,
@@ -276,6 +280,18 @@ public class RepositoryScanService {
 				additions,
 				deletions,
 				changes);
+	}
+
+	/**
+	 * Returns whether the repository contains the requested branch row.
+	 */
+	private boolean branchExists(long repositoryId, long branchId) {
+		Integer branchCount = jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM branches WHERE repository_id = ? AND id = ?",
+				Integer.class,
+				repositoryId,
+				branchId);
+		return branchCount != null && branchCount > 0;
 	}
 
 	/**
