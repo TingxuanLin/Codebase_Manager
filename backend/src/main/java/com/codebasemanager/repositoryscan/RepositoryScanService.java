@@ -162,7 +162,7 @@ public class RepositoryScanService {
 	public void deleteRepository(long repositoryId) {
 		int deletedRows = jdbcTemplate.update("DELETE FROM repositories WHERE id = ?", repositoryId);
 		if (deletedRows == 0) {
-			throw new RepositoryScanException("Repository not found: " + repositoryId);
+			throw new RepositoryResourceNotFoundException("Repository not found: " + repositoryId);
 		}
 	}
 
@@ -171,6 +171,8 @@ public class RepositoryScanService {
 	 */
 	@Transactional
 	public void deleteBranch(long repositoryId, long branchId) {
+		validateRepositoryAndBranch(repositoryId, branchId);
+
 		jdbcTemplate.update("""
 				UPDATE repositories
 				SET default_branch_id = NULL, updated_at = NOW()
@@ -180,13 +182,10 @@ public class RepositoryScanService {
 		jdbcTemplate.update("DELETE FROM repository_metrics WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
 		jdbcTemplate.update("DELETE FROM analysis_artifacts WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
 		jdbcTemplate.update("DELETE FROM risk_scores WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
-		int deletedRows = jdbcTemplate.update(
+		jdbcTemplate.update(
 				"DELETE FROM branches WHERE repository_id = ? AND id = ?",
 				repositoryId,
 				branchId);
-		if (deletedRows == 0) {
-			throw new RepositoryResourceNotFoundException("Branch not found for repository: " + branchId);
-		}
 	}
 
 	/**
@@ -194,14 +193,7 @@ public class RepositoryScanService {
 	 */
 	@Transactional
 	public void setDefaultBranch(long repositoryId, long branchId) {
-		Integer branchCount = jdbcTemplate.queryForObject(
-				"SELECT COUNT(*) FROM branches WHERE repository_id = ? AND id = ?",
-				Integer.class,
-				repositoryId,
-				branchId);
-		if (branchCount == null || branchCount == 0) {
-			throw new RepositoryResourceNotFoundException("Branch not found for repository: " + branchId);
-		}
+		validateRepositoryAndBranch(repositoryId, branchId);
 
 		jdbcTemplate.update("UPDATE branches SET is_default = FALSE, updated_at = NOW() WHERE repository_id = ?", repositoryId);
 		jdbcTemplate.update("""
@@ -217,9 +209,7 @@ public class RepositoryScanService {
 	 */
 	@Transactional(readOnly = true)
 	public BranchComparisonResponse getBranchComparison(long repositoryId, long branchId) {
-		if (!branchExists(repositoryId, branchId)) {
-			throw new RepositoryResourceNotFoundException("Branch not found for repository: " + branchId);
-		}
+		validateRepositoryAndBranch(repositoryId, branchId);
 
 		BranchComparisonMetadata metadata = jdbcTemplate.query("""
 				SELECT sr.id AS scan_run_id,
@@ -292,6 +282,29 @@ public class RepositoryScanService {
 				repositoryId,
 				branchId);
 		return branchCount != null && branchCount > 0;
+	}
+
+	/**
+	 * Validates that the repository exists and owns the requested branch.
+	 */
+	private void validateRepositoryAndBranch(long repositoryId, long branchId) {
+		if (!repositoryExists(repositoryId)) {
+			throw new RepositoryResourceNotFoundException("Repository not found: " + repositoryId);
+		}
+		if (!branchExists(repositoryId, branchId)) {
+			throw new RepositoryResourceNotFoundException("Branch not found for repository: " + branchId);
+		}
+	}
+
+	/**
+	 * Returns whether the requested repository row exists.
+	 */
+	private boolean repositoryExists(long repositoryId) {
+		Integer repositoryCount = jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM repositories WHERE id = ?",
+				Integer.class,
+				repositoryId);
+		return repositoryCount != null && repositoryCount > 0;
 	}
 
 	/**

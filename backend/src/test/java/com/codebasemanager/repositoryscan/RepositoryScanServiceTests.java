@@ -6,6 +6,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.codebasemanager.repositoryscan.dto.BranchComparisonResponse;
@@ -36,12 +38,116 @@ class RepositoryScanServiceTests {
 	}
 
 	@Test
+	void deleteRepositoryRejectsMissingRepository() {
+		when(jdbcTemplate.update("DELETE FROM repositories WHERE id = ?", 10L)).thenReturn(0);
+
+		assertThatThrownBy(() -> repositoryScanService.deleteRepository(10L))
+				.isInstanceOf(RepositoryResourceNotFoundException.class)
+				.hasMessage("Repository not found: 10");
+	}
+
+	@Test
+	void deleteRepositoryAllowsExistingRepository() {
+		when(jdbcTemplate.update("DELETE FROM repositories WHERE id = ?", 10L)).thenReturn(1);
+
+		repositoryScanService.deleteRepository(10L);
+	}
+
+	@Test
+	void setDefaultBranchRejectsNullRepositoryCount() {
+		givenNullRepositoryCount(10L);
+
+		assertThatThrownBy(() -> repositoryScanService.setDefaultBranch(10L, 20L))
+				.isInstanceOf(RepositoryResourceNotFoundException.class)
+				.hasMessage("Repository not found: 10");
+	}
+
+	@Test
+	void setDefaultBranchRejectsMissingRepository() {
+		givenMissingRepository(10L);
+
+		assertThatThrownBy(() -> repositoryScanService.setDefaultBranch(10L, 20L))
+				.isInstanceOf(RepositoryResourceNotFoundException.class)
+				.hasMessage("Repository not found: 10");
+
+		verify(jdbcTemplate, never()).update(contains("UPDATE branches SET is_default = FALSE"), eq(10L));
+	}
+
+	@Test
+	void setDefaultBranchRejectsMissingBranch() {
+		givenExistingRepository(10L);
+		givenMissingBranch(10L, 20L);
+
+		assertThatThrownBy(() -> repositoryScanService.setDefaultBranch(10L, 20L))
+				.isInstanceOf(RepositoryResourceNotFoundException.class)
+				.hasMessage("Branch not found for repository: 20");
+
+		verify(jdbcTemplate, never()).update(contains("UPDATE branches SET is_default = FALSE"), eq(10L));
+	}
+
+	@Test
+	void setDefaultBranchUpdatesRepositoryPointerAndBranchFlags() {
+		givenExistingRepository(10L);
+		givenExistingBranch(10L, 20L);
+
+		repositoryScanService.setDefaultBranch(10L, 20L);
+
+		verify(jdbcTemplate).update("UPDATE branches SET is_default = FALSE, updated_at = NOW() WHERE repository_id = ?", 10L);
+		verify(jdbcTemplate).update(contains("SET default_branch_id = ?"), eq(20L), eq(10L));
+		verify(jdbcTemplate).update(contains("SET is_default = (b.id = r.default_branch_id)"), eq(10L));
+	}
+
+	@Test
+	void deleteBranchRejectsMissingRepository() {
+		givenMissingRepository(10L);
+
+		assertThatThrownBy(() -> repositoryScanService.deleteBranch(10L, 20L))
+				.isInstanceOf(RepositoryResourceNotFoundException.class)
+				.hasMessage("Repository not found: 10");
+
+		verify(jdbcTemplate, never()).update(contains("DELETE FROM branches"), eq(10L), eq(20L));
+	}
+
+	@Test
+	void deleteBranchRemovesBranchScopedRecords() {
+		givenExistingRepository(10L);
+		givenExistingBranch(10L, 20L);
+
+		repositoryScanService.deleteBranch(10L, 20L);
+
+		verify(jdbcTemplate).update(contains("SET default_branch_id = NULL"), eq(10L), eq(20L));
+		verify(jdbcTemplate).update("DELETE FROM source_files WHERE repository_id = ? AND branch_id = ?", 10L, 20L);
+		verify(jdbcTemplate).update("DELETE FROM repository_metrics WHERE repository_id = ? AND branch_id = ?", 10L, 20L);
+		verify(jdbcTemplate).update("DELETE FROM analysis_artifacts WHERE repository_id = ? AND branch_id = ?", 10L, 20L);
+		verify(jdbcTemplate).update("DELETE FROM risk_scores WHERE repository_id = ? AND branch_id = ?", 10L, 20L);
+		verify(jdbcTemplate).update(contains("DELETE FROM branches"), eq(10L), eq(20L));
+	}
+
+	@Test
+	void deleteBranchRejectsMissingBranch() {
+		givenExistingRepository(10L);
+		givenMissingBranch(10L, 20L);
+
+		assertThatThrownBy(() -> repositoryScanService.deleteBranch(10L, 20L))
+				.isInstanceOf(RepositoryResourceNotFoundException.class)
+				.hasMessage("Branch not found for repository: 20");
+
+		verify(jdbcTemplate, never()).update(contains("DELETE FROM branches"), eq(10L), eq(20L));
+	}
+
+	@Test
+	void getBranchComparisonRejectsMissingRepository() {
+		givenMissingRepository(10L);
+
+		assertThatThrownBy(() -> repositoryScanService.getBranchComparison(10L, 99L))
+				.isInstanceOf(RepositoryResourceNotFoundException.class)
+				.hasMessage("Repository not found: 10");
+	}
+
+	@Test
 	void getBranchComparisonRejectsMissingBranch() {
-		when(jdbcTemplate.queryForObject(
-				contains("COUNT(*) FROM branches"),
-				eq(Integer.class),
-				eq(10L),
-				eq(99L))).thenReturn(0);
+		givenExistingRepository(10L);
+		givenMissingBranch(10L, 99L);
 
 		assertThatThrownBy(() -> repositoryScanService.getBranchComparison(10L, 99L))
 				.isInstanceOf(RepositoryResourceNotFoundException.class)
@@ -50,11 +156,8 @@ class RepositoryScanServiceTests {
 
 	@Test
 	void getBranchComparisonRejectsNullBranchCount() {
-		when(jdbcTemplate.queryForObject(
-				contains("COUNT(*) FROM branches"),
-				eq(Integer.class),
-				eq(10L),
-				eq(99L))).thenReturn(null);
+		givenExistingRepository(10L);
+		givenNullBranchCount(10L, 99L);
 
 		assertThatThrownBy(() -> repositoryScanService.getBranchComparison(10L, 99L))
 				.isInstanceOf(RepositoryResourceNotFoundException.class)
@@ -64,11 +167,8 @@ class RepositoryScanServiceTests {
 	@Test
 	@SuppressWarnings("unchecked")
 	void getBranchComparisonRejectsBranchWithoutCompletedScan() {
-		when(jdbcTemplate.queryForObject(
-				contains("COUNT(*) FROM branches"),
-				eq(Integer.class),
-				eq(10L),
-				eq(20L))).thenReturn(1);
+		givenExistingRepository(10L);
+		givenExistingBranch(10L, 20L);
 		when(jdbcTemplate.query(
 				contains("FROM scan_runs"),
 				any(ResultSetExtractor.class),
@@ -89,6 +189,7 @@ class RepositoryScanServiceTests {
 	@SuppressWarnings("unchecked")
 	void getBranchComparisonReturnsCompletedScanWithoutChanges() {
 		OffsetDateTime scannedAt = OffsetDateTime.parse("2026-07-08T14:00:00Z");
+		givenExistingRepository(10L);
 		givenExistingBranch(10L, 20L);
 		givenCompletedScan(10L, 20L, 44L, "feature/current", "main", "abc123", "def456", scannedAt);
 		when(jdbcTemplate.query(
@@ -115,6 +216,7 @@ class RepositoryScanServiceTests {
 	@Test
 	@SuppressWarnings("unchecked")
 	void getBranchComparisonReturnsChangedFilesAndTotals() {
+		givenExistingRepository(10L);
 		givenExistingBranch(10L, 20L);
 		givenCompletedScan(10L, 20L, 44L, "feature/current", "main", "abc123", "def456", null);
 		when(jdbcTemplate.query(
@@ -139,6 +241,7 @@ class RepositoryScanServiceTests {
 	@Test
 	@SuppressWarnings("unchecked")
 	void getBranchComparisonAllowsMissingDefaultBranchAndBaseCommit() {
+		givenExistingRepository(10L);
 		givenExistingBranch(10L, 20L);
 		givenCompletedScan(10L, 20L, 44L, "main", null, null, "def456", null);
 		when(jdbcTemplate.query(
@@ -155,12 +258,49 @@ class RepositoryScanServiceTests {
 		assertThat(response.changedFileCount()).isZero();
 	}
 
+	private void givenExistingRepository(long repositoryId) {
+		when(jdbcTemplate.queryForObject(
+				contains("COUNT(*) FROM repositories"),
+				eq(Integer.class),
+				eq(repositoryId))).thenReturn(1);
+	}
+
+	private void givenMissingRepository(long repositoryId) {
+		when(jdbcTemplate.queryForObject(
+				contains("COUNT(*) FROM repositories"),
+				eq(Integer.class),
+				eq(repositoryId))).thenReturn(0);
+	}
+
+	private void givenNullRepositoryCount(long repositoryId) {
+		when(jdbcTemplate.queryForObject(
+				contains("COUNT(*) FROM repositories"),
+				eq(Integer.class),
+				eq(repositoryId))).thenReturn(null);
+	}
+
 	private void givenExistingBranch(long repositoryId, long branchId) {
 		when(jdbcTemplate.queryForObject(
 				contains("COUNT(*) FROM branches"),
 				eq(Integer.class),
 				eq(repositoryId),
 				eq(branchId))).thenReturn(1);
+	}
+
+	private void givenMissingBranch(long repositoryId, long branchId) {
+		when(jdbcTemplate.queryForObject(
+				contains("COUNT(*) FROM branches"),
+				eq(Integer.class),
+				eq(repositoryId),
+				eq(branchId))).thenReturn(0);
+	}
+
+	private void givenNullBranchCount(long repositoryId, long branchId) {
+		when(jdbcTemplate.queryForObject(
+				contains("COUNT(*) FROM branches"),
+				eq(Integer.class),
+				eq(repositoryId),
+				eq(branchId))).thenReturn(null);
 	}
 
 	@SuppressWarnings("unchecked")
