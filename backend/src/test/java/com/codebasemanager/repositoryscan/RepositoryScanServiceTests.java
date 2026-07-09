@@ -31,10 +31,12 @@ class RepositoryScanServiceTests {
 	private JdbcTemplate jdbcTemplate;
 
 	private RepositoryScanService repositoryScanService;
+	private BranchScanService branchScanService;
 
 	@BeforeEach
 	void setUp() {
-		repositoryScanService = new RepositoryScanService(jdbcTemplate);
+		branchScanService = new BranchScanService(jdbcTemplate);
+		repositoryScanService = new RepositoryScanService(jdbcTemplate, branchScanService);
 	}
 
 	@Test
@@ -57,7 +59,7 @@ class RepositoryScanServiceTests {
 	void setDefaultBranchRejectsNullRepositoryCount() {
 		givenNullRepositoryCount(10L);
 
-		assertThatThrownBy(() -> repositoryScanService.setDefaultBranch(10L, 20L))
+		assertThatThrownBy(() -> branchScanService.setDefaultBranch(10L, 20L))
 				.isInstanceOf(RepositoryResourceNotFoundException.class)
 				.hasMessage("Repository not found: 10");
 	}
@@ -66,7 +68,7 @@ class RepositoryScanServiceTests {
 	void setDefaultBranchRejectsMissingRepository() {
 		givenMissingRepository(10L);
 
-		assertThatThrownBy(() -> repositoryScanService.setDefaultBranch(10L, 20L))
+		assertThatThrownBy(() -> branchScanService.setDefaultBranch(10L, 20L))
 				.isInstanceOf(RepositoryResourceNotFoundException.class)
 				.hasMessage("Repository not found: 10");
 
@@ -78,7 +80,7 @@ class RepositoryScanServiceTests {
 		givenExistingRepository(10L);
 		givenMissingBranch(10L, 20L);
 
-		assertThatThrownBy(() -> repositoryScanService.setDefaultBranch(10L, 20L))
+		assertThatThrownBy(() -> branchScanService.setDefaultBranch(10L, 20L))
 				.isInstanceOf(RepositoryResourceNotFoundException.class)
 				.hasMessage("Branch not found for repository: 20");
 
@@ -90,7 +92,7 @@ class RepositoryScanServiceTests {
 		givenExistingRepository(10L);
 		givenExistingBranch(10L, 20L);
 
-		repositoryScanService.setDefaultBranch(10L, 20L);
+		branchScanService.setDefaultBranch(10L, 20L);
 
 		verify(jdbcTemplate).update("UPDATE branches SET is_default = FALSE, updated_at = NOW() WHERE repository_id = ?", 10L);
 		verify(jdbcTemplate).update(contains("SET default_branch_id = ?"), eq(20L), eq(10L));
@@ -101,7 +103,7 @@ class RepositoryScanServiceTests {
 	void deleteBranchRejectsMissingRepository() {
 		givenMissingRepository(10L);
 
-		assertThatThrownBy(() -> repositoryScanService.deleteBranch(10L, 20L))
+		assertThatThrownBy(() -> branchScanService.deleteBranch(10L, 20L))
 				.isInstanceOf(RepositoryResourceNotFoundException.class)
 				.hasMessage("Repository not found: 10");
 
@@ -113,7 +115,7 @@ class RepositoryScanServiceTests {
 		givenExistingRepository(10L);
 		givenExistingBranch(10L, 20L);
 
-		repositoryScanService.deleteBranch(10L, 20L);
+		branchScanService.deleteBranch(10L, 20L);
 
 		verify(jdbcTemplate).update(contains("SET default_branch_id = NULL"), eq(10L), eq(20L));
 		verify(jdbcTemplate).update("DELETE FROM source_files WHERE repository_id = ? AND branch_id = ?", 10L, 20L);
@@ -128,7 +130,7 @@ class RepositoryScanServiceTests {
 		givenExistingRepository(10L);
 		givenMissingBranch(10L, 20L);
 
-		assertThatThrownBy(() -> repositoryScanService.deleteBranch(10L, 20L))
+		assertThatThrownBy(() -> branchScanService.deleteBranch(10L, 20L))
 				.isInstanceOf(RepositoryResourceNotFoundException.class)
 				.hasMessage("Branch not found for repository: 20");
 
@@ -139,7 +141,7 @@ class RepositoryScanServiceTests {
 	void getBranchComparisonRejectsMissingRepository() {
 		givenMissingRepository(10L);
 
-		assertThatThrownBy(() -> repositoryScanService.getBranchComparison(10L, 99L))
+		assertThatThrownBy(() -> branchScanService.getBranchComparison(10L, 99L))
 				.isInstanceOf(RepositoryResourceNotFoundException.class)
 				.hasMessage("Repository not found: 10");
 	}
@@ -149,7 +151,7 @@ class RepositoryScanServiceTests {
 		givenExistingRepository(10L);
 		givenMissingBranch(10L, 99L);
 
-		assertThatThrownBy(() -> repositoryScanService.getBranchComparison(10L, 99L))
+		assertThatThrownBy(() -> branchScanService.getBranchComparison(10L, 99L))
 				.isInstanceOf(RepositoryResourceNotFoundException.class)
 				.hasMessage("Branch not found for repository: 99");
 	}
@@ -159,7 +161,7 @@ class RepositoryScanServiceTests {
 		givenExistingRepository(10L);
 		givenNullBranchCount(10L, 99L);
 
-		assertThatThrownBy(() -> repositoryScanService.getBranchComparison(10L, 99L))
+		assertThatThrownBy(() -> branchScanService.getBranchComparison(10L, 99L))
 				.isInstanceOf(RepositoryResourceNotFoundException.class)
 				.hasMessage("Branch not found for repository: 99");
 	}
@@ -180,7 +182,7 @@ class RepositoryScanServiceTests {
 			return extractor.extractData(resultSet);
 		});
 
-		assertThatThrownBy(() -> repositoryScanService.getBranchComparison(10L, 20L))
+		assertThatThrownBy(() -> branchScanService.getBranchComparison(10L, 20L))
 				.isInstanceOf(RepositoryScanException.class)
 				.hasMessage("No completed scan found for branch: 20");
 	}
@@ -197,7 +199,7 @@ class RepositoryScanServiceTests {
 				any(RowMapper.class),
 				eq(44L))).thenReturn(List.of());
 
-		BranchComparisonResponse response = repositoryScanService.getBranchComparison(10L, 20L);
+		BranchComparisonResponse response = branchScanService.getBranchComparison(10L, 20L);
 
 		assertThat(response.repositoryId()).isEqualTo(10L);
 		assertThat(response.branchId()).isEqualTo(20L);
@@ -227,7 +229,7 @@ class RepositoryScanServiceTests {
 				new FileChangeResponse("src/Old.java", null, "deleted", 0, 8),
 				new FileChangeResponse("src/Renamed.java", "src/Original.java", "renamed", 3, 2)));
 
-		BranchComparisonResponse response = repositoryScanService.getBranchComparison(10L, 20L);
+		BranchComparisonResponse response = branchScanService.getBranchComparison(10L, 20L);
 
 		assertThat(response.changedFileCount()).isEqualTo(3);
 		assertThat(response.additions()).isEqualTo(18);
@@ -249,7 +251,7 @@ class RepositoryScanServiceTests {
 				any(RowMapper.class),
 				eq(44L))).thenReturn(List.of());
 
-		BranchComparisonResponse response = repositoryScanService.getBranchComparison(10L, 20L);
+		BranchComparisonResponse response = branchScanService.getBranchComparison(10L, 20L);
 
 		assertThat(response.branch()).isEqualTo("main");
 		assertThat(response.defaultBranch()).isNull();
