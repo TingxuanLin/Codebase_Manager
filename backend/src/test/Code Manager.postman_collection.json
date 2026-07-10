@@ -35,7 +35,7 @@
             "header": [],
             "body": {
               "mode": "raw",
-              "raw": "{\n    \"url\": \"https://github.com/TingxuanLin/Codebase_Manager.git\",\n    \"branch\": \"feature/repo-feature\"\n}",
+              "raw": "{\n    \"url\": \"https://github.com/TingxuanLin/Codebase_Manager.git\",\n    \"branch\": \"main\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -180,6 +180,76 @@
                 "branches",
                 "10",
                 "default"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "PR feature",
+      "item": [
+        {
+          "name": "Check If new PR created",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8080/repositories/1/pull-requests/check",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "repositories",
+                "1",
+                "pull-requests",
+                "check"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Open PRs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8080/repositories/1/pull-requests",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "repositories",
+                "1",
+                "pull-requests"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List All PRs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8080/repositories/1/pull-requests/all",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "repositories",
+                "1",
+                "pull-requests",
+                "all"
               ]
             }
           },
