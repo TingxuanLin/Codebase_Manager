@@ -26,11 +26,5 @@ CREATE TABLE IF NOT EXISTS pull_requests (
     CONSTRAINT chk_pull_requests_html_url_not_blank CHECK (length(trim(html_url)) > 0)
 );
 
-CREATE INDEX IF NOT EXISTS idx_pull_requests_repository_id
-    ON pull_requests (repository_id);
-
-CREATE INDEX IF NOT EXISTS idx_pull_requests_state
-    ON pull_requests (state);
-
-CREATE INDEX IF NOT EXISTS idx_pull_requests_base_branch
-    ON pull_requests (base_branch);
+CREATE INDEX IF NOT EXISTS idx_pull_requests_repository_base_branch
+    ON pull_requests (repository_id, base_branch);
