@@ -2,6 +2,7 @@ package com.codebasemanager.repositoryscan;
 
 import com.codebasemanager.repositoryscan.dto.PullRequestCheckResponse;
 import com.codebasemanager.repositoryscan.dto.PullRequestDiffResponse;
+import com.codebasemanager.repositoryscan.dto.PullRequestRiskResponse;
 import com.codebasemanager.repositoryscan.dto.PullRequestSummaryResponse;
 import java.util.List;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -15,12 +16,14 @@ import org.springframework.web.bind.annotation.RestController;
 public class PullRequestController {
 
 	private final PullRequestService pullRequestService;
+	private final PullRequestRiskService pullRequestRiskService;
 
 	/**
 	 * Receives the service that owns pull request checks and persistence.
 	 */
-	public PullRequestController(PullRequestService pullRequestService) {
+	public PullRequestController(PullRequestService pullRequestService, PullRequestRiskService pullRequestRiskService) {
 		this.pullRequestService = pullRequestService;
+		this.pullRequestRiskService = pullRequestRiskService;
 	}
 
 	/**
@@ -39,6 +42,16 @@ public class PullRequestController {
 			@PathVariable long repositoryId,
 			@PathVariable int pullRequestNumber) {
 		return pullRequestService.getStoredPullRequestDiff(repositoryId, pullRequestNumber);
+	}
+
+	/**
+	 * Calculates and stores rule-based risk findings for one pull request.
+	 */
+	@GetMapping("/{pullRequestNumber}/risk")
+	public PullRequestRiskResponse getPullRequestRisk(
+			@PathVariable long repositoryId,
+			@PathVariable int pullRequestNumber) {
+		return pullRequestRiskService.analyzePullRequestRisk(repositoryId, pullRequestNumber);
 	}
 
 	/**
