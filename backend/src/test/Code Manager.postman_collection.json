@@ -254,6 +254,57 @@
             }
           },
           "response": []
+        },
+        {
+          "name": "Store diff From Open PR",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8080/repositories/1/pull-requests/7/diff",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "repositories",
+                "1",
+                "pull-requests",
+                "7",
+                "diff"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Risk Analysis",
+      "item": [
+        {
+          "name": "New Request",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8080/repositories/1/pull-requests/7/risk",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "repositories",
+                "1",
+                "pull-requests",
+                "7",
+                "risk"
+              ]
+            }
+          },
+          "response": []
         }
       ]
     }
