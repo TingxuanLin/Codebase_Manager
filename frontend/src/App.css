@@ -80,30 +80,6 @@ h1 {
   padding: 24px;
 }
 
-.segmented-control {
-  display: inline-grid;
-  justify-self: start;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid #d9e0e7;
-  border-radius: 8px;
-  background: #f3f6f9;
-}
-
-.segmented-control button {
-  min-height: 36px;
-  padding: 0 14px;
-  background: transparent;
-  color: #374151;
-}
-
-.segmented-control button.is-active {
-  background: #ffffff;
-  color: #111827;
-  box-shadow: 0 1px 4px rgba(31, 41, 55, 0.12);
-}
-
 .field-grid,
 .results {
   display: grid;

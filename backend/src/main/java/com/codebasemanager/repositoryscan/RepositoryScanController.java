@@ -1,7 +1,6 @@
 package com.codebasemanager.repositoryscan;
 
 import com.codebasemanager.repositoryscan.dto.ParseGitHubRepositoryRequest;
-import com.codebasemanager.repositoryscan.dto.ParseRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryResponse;
 import com.codebasemanager.repositoryscan.dto.GitHubBranchResponse;
 import com.codebasemanager.repositoryscan.dto.RepositorySummaryResponse;
@@ -45,15 +44,6 @@ public class RepositoryScanController {
 	@GetMapping("/github-branches")
 	public List<GitHubBranchResponse> listGitHubBranches(@RequestParam String url) {
 		return repositoryScanService.listGitHubBranches(url);
-	}
-
-	/**
-	 * Parses a Git repository that already exists on the backend machine.
-	 */
-	@PostMapping("/parse-local")
-	@ResponseStatus(HttpStatus.CREATED)
-	public ParseRepositoryResponse parseLocalRepository(@Valid @RequestBody ParseRepositoryRequest request) {
-		return repositoryScanService.parseAndStore(request);
 	}
 
 	/**

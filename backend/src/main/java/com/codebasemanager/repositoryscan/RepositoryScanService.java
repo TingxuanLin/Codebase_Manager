@@ -1,12 +1,11 @@
 package com.codebasemanager.repositoryscan;
 
-import com.codebasemanager.repositoryscan.dto.BranchComparisonResponse;
-import com.codebasemanager.repositoryscan.dto.FileChangeResponse;
 import com.codebasemanager.repositoryscan.dto.ParseGitHubRepositoryRequest;
-import com.codebasemanager.repositoryscan.dto.ParseRepositoryRequest;
 import com.codebasemanager.repositoryscan.dto.ParseRepositoryResponse;
 import com.codebasemanager.repositoryscan.dto.GitHubBranchResponse;
 import com.codebasemanager.repositoryscan.dto.RepositorySummaryResponse;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -27,6 +26,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.springframework.dao.EmptyResultDataAccessException;
@@ -45,17 +45,30 @@ public class RepositoryScanService {
 	private static final Pattern FUNCTION_PATTERN = Pattern.compile("\\bfunction\\s+([A-Za-z_$][\\w$]*)\\s*\\(");
 	private static final Pattern ARROW_FUNCTION_PATTERN = Pattern.compile("\\b(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:async\\s*)?(?:\\([^)]*\\)|[A-Za-z_$][\\w$]*)\\s*=>");
 	private static final Pattern PYTHON_METHOD_PATTERN = Pattern.compile("^\\s*def\\s+([A-Za-z_][\\w]*)\\s*\\(");
+	private static final Pattern JAVA_IMPORT_PATTERN = Pattern.compile("^\\s*import\\s+(?:static\\s+)?([\\w.]+)");
+	private static final Pattern TYPESCRIPT_IMPORT_PATTERN = Pattern.compile("\\bimport\\b[^;]*\\bfrom\\s+['\"]([^'\"]+)['\"]");
+	private static final Pattern REQUIRE_PATTERN = Pattern.compile("\\brequire\\s*\\(\\s*['\"]([^'\"]+)['\"]\\s*\\)");
+	private static final Pattern PYTHON_IMPORT_PATTERN = Pattern.compile("^\\s*(?:from\\s+([\\w.]+)\\s+import|import\\s+([\\w.]+))");
+	private static final Pattern SPRING_ROUTE_ANNOTATION_PATTERN = Pattern.compile("@(GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)\\s*(?:\\(([^)]*)\\))?");
+	private static final Pattern EXPRESS_ROUTE_PATTERN = Pattern.compile("\\b(?:app|router)\\s*\\.\\s*(get|post|put|delete|patch|all)\\s*\\(\\s*['\"]([^'\"]+)['\"]");
+	private static final Set<String> DEPENDENCY_FILE_NAMES = Set.of(
+			"package.json", "package-lock.json", "requirements.txt", "pyproject.toml",
+			"pom.xml", "build.gradle", "build.gradle.kts", "go.mod", "cargo.toml",
+			"composer.json", "gemfile");
 	private static final List<String> SKIPPED_DIRECTORIES = List.of(
 			".git", ".gradle", ".idea", ".vscode", "build", "dist", "node_modules", "out", "target",
 			"coverage", ".venv", "venv", "__pycache__");
 
 	private final JdbcTemplate jdbcTemplate;
+	private final BranchScanService branchScanService;
+	private final ObjectMapper objectMapper = new ObjectMapper();
 
 	/**
 	 * Receives the JDBC helper used for all parse persistence operations.
 	 */
-	public RepositoryScanService(JdbcTemplate jdbcTemplate) {
+	public RepositoryScanService(JdbcTemplate jdbcTemplate, BranchScanService branchScanService) {
 		this.jdbcTemplate = jdbcTemplate;
+		this.branchScanService = branchScanService;
 	}
 
 	/**
@@ -122,26 +135,7 @@ public class RepositoryScanService {
 	 */
 	public List<GitHubBranchResponse> listGitHubBranches(String url) {
 		validateGitRepositoryUrl(url);
-		String output = runGitCommand(Path.of("."), List.of("ls-remote", "--heads", url));
-		if (!StringUtils.hasText(output)) {
-			return List.of();
-		}
-		return output.lines()
-				.map(String::strip)
-				.filter(StringUtils::hasText)
-				.map(this::parseGitBranchLine)
-				.toList();
-	}
-
-	/**
-	 * Validates a local Git working tree and stores its parsed repository snapshot.
-	 */
-	@Transactional
-	public ParseRepositoryResponse parseAndStore(ParseRepositoryRequest request) {
-		Path repoPath = resolveRepositoryPath(request.path());
-		String repositoryName = firstNonBlank(request.name(), repoPath.getFileName().toString());
-		String repositoryUrl = firstNonBlank(request.url(), findRemoteUrl(repoPath).orElse(toFileUri(repoPath)));
-		return parseAndStore(repoPath, repositoryName, repositoryUrl);
+		return branchScanService.listGitHubBranches(url);
 	}
 
 	/**
@@ -150,9 +144,9 @@ public class RepositoryScanService {
 	@Transactional
 	public ParseRepositoryResponse parseGitHubAndStore(ParseGitHubRepositoryRequest request) {
 		validateGitRepositoryUrl(request.url());
-		Path repoPath = cloneOrUpdateRepository(request.url(), request.branch());
+		Path repoPath = cloneOrUpdateRepository(request.url(), firstNonBlank(request.branch(), "main"));
 		String repositoryName = firstNonBlank(request.name(), deriveRepositoryName(request.url(), repoPath));
-		return parseAndStore(new ParseRepositoryRequest(repoPath.toString(), repositoryName, request.url()));
+		return parseAndStore(repoPath, repositoryName, request.url());
 	}
 
 	/**
@@ -167,147 +161,6 @@ public class RepositoryScanService {
 	}
 
 	/**
-	 * Deletes one branch and branch-scoped records for a repository.
-	 */
-	@Transactional
-	public void deleteBranch(long repositoryId, long branchId) {
-		validateRepositoryAndBranch(repositoryId, branchId);
-
-		jdbcTemplate.update("""
-				UPDATE repositories
-				SET default_branch_id = NULL, updated_at = NOW()
-				WHERE id = ? AND default_branch_id = ?
-				""", repositoryId, branchId);
-		jdbcTemplate.update("DELETE FROM source_files WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
-		jdbcTemplate.update("DELETE FROM repository_metrics WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
-		jdbcTemplate.update("DELETE FROM analysis_artifacts WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
-		jdbcTemplate.update("DELETE FROM risk_scores WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
-		jdbcTemplate.update(
-				"DELETE FROM branches WHERE repository_id = ? AND id = ?",
-				repositoryId,
-				branchId);
-	}
-
-	/**
-	 * Makes one branch the default branch used as the comparison base.
-	 */
-	@Transactional
-	public void setDefaultBranch(long repositoryId, long branchId) {
-		validateRepositoryAndBranch(repositoryId, branchId);
-
-		jdbcTemplate.update("UPDATE branches SET is_default = FALSE, updated_at = NOW() WHERE repository_id = ?", repositoryId);
-		jdbcTemplate.update("""
-				UPDATE repositories
-				SET default_branch_id = ?, updated_at = NOW()
-				WHERE id = ?
-				""", branchId, repositoryId);
-		syncDefaultBranchFlag(repositoryId);
-	}
-
-	/**
-	 * Returns the latest branch scan and its stored file changes against the default branch.
-	 */
-	@Transactional(readOnly = true)
-	public BranchComparisonResponse getBranchComparison(long repositoryId, long branchId) {
-		validateRepositoryAndBranch(repositoryId, branchId);
-
-		BranchComparisonMetadata metadata = jdbcTemplate.query("""
-				SELECT sr.id AS scan_run_id,
-				       current_branch.name AS branch,
-				       default_branch.name AS default_branch,
-				       sr.base_commit_sha,
-				       sr.head_commit_sha,
-				       sr.completed_at AS scanned_at
-				FROM scan_runs sr
-				JOIN branches current_branch ON current_branch.repository_id = sr.repository_id
-				    AND current_branch.id = sr.branch_id
-				JOIN repositories repository ON repository.id = sr.repository_id
-				LEFT JOIN branches default_branch ON default_branch.repository_id = repository.id
-				    AND default_branch.id = repository.default_branch_id
-				WHERE sr.repository_id = ?
-				  AND sr.branch_id = ?
-				  AND sr.status = 'completed'
-				ORDER BY COALESCE(sr.completed_at, sr.started_at) DESC, sr.id DESC
-				LIMIT 1
-				""", rs -> {
-			if (!rs.next()) {
-				throw new RepositoryScanException("No completed scan found for branch: " + branchId);
-			}
-			return new BranchComparisonMetadata(
-					rs.getLong("scan_run_id"),
-					rs.getString("branch"),
-					rs.getString("default_branch"),
-					rs.getString("base_commit_sha"),
-					rs.getString("head_commit_sha"),
-					rs.getObject("scanned_at", OffsetDateTime.class));
-		}, repositoryId, branchId);
-
-		List<FileChangeResponse> changes = jdbcTemplate.query("""
-				SELECT path, old_path, change_type, additions, deletions
-				FROM file_changes
-				WHERE scan_run_id = ?
-				ORDER BY path ASC
-				""", (rs, rowNum) -> new FileChangeResponse(
-				rs.getString("path"),
-				rs.getString("old_path"),
-				rs.getString("change_type"),
-				rs.getInt("additions"),
-				rs.getInt("deletions")), metadata.scanRunId());
-
-		int additions = changes.stream().mapToInt(FileChangeResponse::additions).sum();
-		int deletions = changes.stream().mapToInt(FileChangeResponse::deletions).sum();
-
-		return new BranchComparisonResponse(
-				repositoryId,
-				branchId,
-				metadata.scanRunId(),
-				metadata.branch(),
-				metadata.defaultBranch(),
-				metadata.baseCommitSha(),
-				metadata.headCommitSha(),
-				metadata.scannedAt(),
-				changes.size(),
-				additions,
-				deletions,
-				changes);
-	}
-
-	/**
-	 * Returns whether the repository contains the requested branch row.
-	 */
-	private boolean branchExists(long repositoryId, long branchId) {
-		Integer branchCount = jdbcTemplate.queryForObject(
-				"SELECT COUNT(*) FROM branches WHERE repository_id = ? AND id = ?",
-				Integer.class,
-				repositoryId,
-				branchId);
-		return branchCount != null && branchCount > 0;
-	}
-
-	/**
-	 * Validates that the repository exists and owns the requested branch.
-	 */
-	private void validateRepositoryAndBranch(long repositoryId, long branchId) {
-		if (!repositoryExists(repositoryId)) {
-			throw new RepositoryResourceNotFoundException("Repository not found: " + repositoryId);
-		}
-		if (!branchExists(repositoryId, branchId)) {
-			throw new RepositoryResourceNotFoundException("Branch not found for repository: " + branchId);
-		}
-	}
-
-	/**
-	 * Returns whether the requested repository row exists.
-	 */
-	private boolean repositoryExists(long repositoryId) {
-		Integer repositoryCount = jdbcTemplate.queryForObject(
-				"SELECT COUNT(*) FROM repositories WHERE id = ?",
-				Integer.class,
-				repositoryId);
-		return repositoryCount != null && repositoryCount > 0;
-	}
-
-	/**
 	 * Persists Git metadata, parsed source files, classes, methods, and metrics.
 	 */
 	@Transactional
@@ -315,32 +168,48 @@ public class RepositoryScanService {
 		GitInfo gitInfo = readGitInfo(repoPath);
 
 		List<ParsedSourceFile> files = parseSourceFiles(repoPath);
+		List<ExternalDependency> externalDependencies = parseExternalDependencies(repoPath);
 		long repositoryId = upsertRepository(repositoryName, repositoryUrl);
 		long commitId = upsertCommit(repositoryId, gitInfo);
 		long branchId = upsertBranch(repositoryId, gitInfo);
 		ensureDefaultBranch(repositoryId, branchId);
 		linkBranchCommit(repositoryId, branchId, commitId);
-		String baseCommitSha = findComparisonBaseCommitSha(repositoryId, branchId).orElse(null);
+		String baseCommitSha = branchScanService.findComparisonBaseCommitSha(repositoryId, branchId).orElse(null);
 		long scanRunId = insertScanRun(repositoryId, branchId, baseCommitSha, gitInfo.headCommitSha());
 
+		jdbcTemplate.update("DELETE FROM project_directories WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
+		jdbcTemplate.update("DELETE FROM external_dependencies WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
 		jdbcTemplate.update("DELETE FROM source_files WHERE repository_id = ? AND branch_id = ?", repositoryId, branchId);
+		insertProjectDirectories(repositoryId, branchId, scanRunId, files);
 
 		int classCount = 0;
 		int methodCount = 0;
+		Map<String, Long> fileIdsByPath = new HashMap<>();
+		Map<String, Long> classIdsByName = new HashMap<>();
+		Map<String, Long> classIdsByPathAndName = new HashMap<>();
+		Map<String, Long> methodIdsByPathClassAndName = new HashMap<>();
 		for (ParsedSourceFile file : files) {
 			long fileId = insertSourceFile(repositoryId, branchId, scanRunId, file);
+			fileIdsByPath.put(file.path(), fileId);
 			classCount += file.classes().size();
 			for (ParsedClass parsedClass : file.classes()) {
 				long classId = insertClass(fileId, parsedClass);
+				classIdsByName.putIfAbsent(parsedClass.name(), classId);
+				classIdsByPathAndName.put(classKey(file.path(), parsedClass.name()), classId);
 				methodCount += parsedClass.methods().size();
 				for (ParsedMethod method : parsedClass.methods()) {
-					insertMethod(classId, method);
+					long methodId = insertMethod(classId, method);
+					methodIdsByPathClassAndName.put(methodKey(file.path(), parsedClass.name(), method.name()), methodId);
 				}
 			}
 		}
 
-		upsertRepositoryMetrics(repositoryId, branchId, scanRunId, files.size(), classCount, methodCount);
-		insertFileChanges(repoPath, scanRunId, baseCommitSha, gitInfo.headCommitSha());
+		int dependencyCount = insertInternalDependencies(files, classIdsByName, classIdsByPathAndName);
+		int apiRouteCount = insertApiRoutes(repositoryId, branchId, scanRunId, files, fileIdsByPath, classIdsByPathAndName, methodIdsByPathClassAndName);
+		int externalDependencyCount = insertExternalDependencies(repositoryId, branchId, scanRunId, externalDependencies);
+
+		upsertRepositoryMetrics(repositoryId, branchId, scanRunId, files.size(), classCount, methodCount, dependencyCount + externalDependencyCount);
+		branchScanService.insertFileChanges(repoPath, scanRunId, baseCommitSha, gitInfo.headCommitSha());
 		completeScanRun(scanRunId);
 
 		return new ParseRepositoryResponse(
@@ -352,7 +221,10 @@ public class RepositoryScanService {
 				gitInfo.headCommitSha(),
 				files.size(),
 				classCount,
-				methodCount);
+				methodCount,
+				dependencyCount,
+				externalDependencyCount,
+				apiRouteCount);
 	}
 
 	/**
@@ -370,82 +242,14 @@ public class RepositoryScanService {
 		if (Files.isDirectory(cachePath.resolve(".git"))) {
 			runGit(cachePath, "remote", "set-url", "origin", url);
 			runGit(cachePath, "fetch", "--all", "--prune");
-			checkoutRequestedBranch(cachePath, branch);
+			branchScanService.checkoutRequestedBranch(cachePath, branch);
 			return cachePath;
 		}
 
 		List<String> cloneArgs = new ArrayList<>(List.of("clone", url, cachePath.toString()));
 		runGitCommand(Path.of("."), cloneArgs);
-		checkoutRequestedBranch(cachePath, branch);
+		branchScanService.checkoutRequestedBranch(cachePath, branch);
 		return cachePath;
-	}
-
-	/**
-	 * Checks out the requested branch, or the remote default branch when none is provided.
-	 */
-	private void checkoutRequestedBranch(Path repoPath, String branch) {
-		if (StringUtils.hasText(branch)) {
-			String requestedBranch = branch.strip();
-			if (branchExists(repoPath, requestedBranch)) {
-				runGit(repoPath, "checkout", requestedBranch);
-			}
-			else {
-				runGit(repoPath, "checkout", "-B", requestedBranch, "origin/" + requestedBranch);
-			}
-			runGit(repoPath, "pull", "--ff-only");
-			return;
-		}
-
-		String defaultBranch = remoteDefaultBranch(repoPath);
-		runGit(repoPath, "checkout", "-B", defaultBranch, "origin/" + defaultBranch);
-		runGit(repoPath, "pull", "--ff-only");
-	}
-
-	/**
-	 * Returns whether a local branch name already exists in the cached repository.
-	 */
-	private boolean branchExists(Path repoPath, String branch) {
-		try {
-			runGit(repoPath, "rev-parse", "--verify", branch);
-			return true;
-		}
-		catch (RepositoryScanException ex) {
-			return false;
-		}
-	}
-
-	/**
-	 * Reads origin/HEAD to find the remote default branch, falling back to main.
-	 */
-	private String remoteDefaultBranch(Path repoPath) {
-		try {
-			String originHead = runGit(repoPath, "symbolic-ref", "--short", "refs/remotes/origin/HEAD");
-			if (originHead.startsWith("origin/")) {
-				return originHead.substring("origin/".length());
-			}
-		}
-		catch (RepositoryScanException ex) {
-			runGit(repoPath, "remote", "set-head", "origin", "--auto");
-			String originHead = runGit(repoPath, "symbolic-ref", "--short", "refs/remotes/origin/HEAD");
-			if (originHead.startsWith("origin/")) {
-				return originHead.substring("origin/".length());
-			}
-		}
-		return "main";
-	}
-
-	/**
-	 * Converts user input into an absolute path and verifies it is a Git working tree.
-	 */
-	private Path resolveRepositoryPath(String rawPath) {
-		Path path = Path.of(rawPath).toAbsolutePath().normalize();
-		if (!Files.isDirectory(path)) {
-			throw new RepositoryScanException("Repository path must be an existing directory: " + rawPath);
-		}
-		if (!Files.isDirectory(path.resolve(".git"))) {
-			throw new RepositoryScanException("Repository path must be a Git working tree: " + rawPath);
-		}
-		return path;
 	}
 
 	/**
@@ -459,19 +263,6 @@ public class RepositoryScanService {
 		String message = runGit(repoPath, "show", "-s", "--format=%B", "HEAD");
 		String committedAt = runGit(repoPath, "show", "-s", "--format=%cI", "HEAD");
 		return new GitInfo(branch, headSha, authorName, authorEmail, message, committedAt);
-	}
-
-	/**
-	 * Returns remote.origin.url when the repository has an origin configured.
-	 */
-	private Optional<String> findRemoteUrl(Path repoPath) {
-		try {
-			String remoteUrl = runGit(repoPath, "config", "--get", "remote.origin.url");
-			return StringUtils.hasText(remoteUrl) ? Optional.of(remoteUrl) : Optional.empty();
-		}
-		catch (RepositoryScanException ex) {
-			return Optional.empty();
-		}
 	}
 
 	/**
@@ -510,17 +301,6 @@ public class RepositoryScanService {
 			Thread.currentThread().interrupt();
 			throw new RepositoryScanException("Git command was interrupted.", ex);
 		}
-	}
-
-	/**
-	 * Parses one git ls-remote branch line into a branch response.
-	 */
-	private GitHubBranchResponse parseGitBranchLine(String line) {
-		String[] parts = line.split("\\s+", 2);
-		if (parts.length != 2 || !parts[1].startsWith("refs/heads/")) {
-			throw new RepositoryScanException("Unexpected git branch output: " + line);
-		}
-		return new GitHubBranchResponse(parts[1].substring("refs/heads/".length()), parts[0]);
 	}
 
 	/**
@@ -652,7 +432,158 @@ public class RepositoryScanService {
 		}
 		int loc = (int) lines.stream().filter(line -> StringUtils.hasText(line.strip())).count();
 		List<ParsedClass> classes = parseClasses(language, path, lines, loc);
-		return new ParsedSourceFile(relativePath, language, loc, classes);
+		List<String> imports = parseImports(language, lines);
+		List<ParsedApiRoute> apiRoutes = parseApiRoutes(language, lines, classes);
+		return new ParsedSourceFile(relativePath, language, loc, classes, imports, apiRoutes);
+	}
+
+	/**
+	 * Extracts imports that can be resolved to internal class dependency edges.
+	 */
+	private List<String> parseImports(String language, List<String> lines) {
+		List<String> imports = new ArrayList<>();
+		for (String line : lines) {
+			Matcher matcher = switch (language) {
+				case "Java", "Kotlin" -> JAVA_IMPORT_PATTERN.matcher(line);
+				case "JavaScript", "TypeScript" -> TYPESCRIPT_IMPORT_PATTERN.matcher(line);
+				case "Python" -> PYTHON_IMPORT_PATTERN.matcher(line);
+				default -> REQUIRE_PATTERN.matcher(line);
+			};
+			while (matcher.find()) {
+				String imported = firstNonBlank(matcher.group(1), matcher.groupCount() > 1 ? matcher.group(2) : null);
+				if (StringUtils.hasText(imported)) {
+					imports.add(imported);
+				}
+			}
+			if ("JavaScript".equals(language) || "TypeScript".equals(language)) {
+				Matcher requireMatcher = REQUIRE_PATTERN.matcher(line);
+				while (requireMatcher.find()) {
+					imports.add(requireMatcher.group(1));
+				}
+			}
+		}
+		return imports;
+	}
+
+	/**
+	 * Extracts common backend API route declarations for baseline risk inventory.
+	 */
+	private List<ParsedApiRoute> parseApiRoutes(String language, List<String> lines, List<ParsedClass> classes) {
+		if ("Java".equals(language) || "Kotlin".equals(language)) {
+			return parseSpringApiRoutes(lines, classes);
+		}
+		if ("JavaScript".equals(language) || "TypeScript".equals(language)) {
+			return parseExpressApiRoutes(lines, classes);
+		}
+		return List.of();
+	}
+
+	/**
+	 * Extracts Spring mapping annotations and attaches them to the next detected method.
+	 */
+	private List<ParsedApiRoute> parseSpringApiRoutes(List<String> lines, List<ParsedClass> classes) {
+		List<ParsedApiRoute> routes = new ArrayList<>();
+		String className = classes.isEmpty() ? null : classes.get(0).name();
+		String classBasePath = "";
+		for (int index = 0; index < lines.size(); index++) {
+			String line = lines.get(index);
+			Matcher matcher = SPRING_ROUTE_ANNOTATION_PATTERN.matcher(line);
+			while (matcher.find()) {
+				String httpMethod = springHttpMethod(matcher.group(1));
+				String routePath = extractAnnotationPath(matcher.group(2));
+				if ("ANY".equals(httpMethod) && line.contains("class ")) {
+					classBasePath = normalizeRoutePath(routePath);
+					continue;
+				}
+				String handlerMethod = findNextMethodName(lines, index + 1);
+				routes.add(new ParsedApiRoute(
+						httpMethod,
+						joinRoutePaths(classBasePath, routePath),
+						className,
+						handlerMethod,
+						index + 1));
+			}
+		}
+		return routes;
+	}
+
+	/**
+	 * Extracts Express-style router/app route declarations.
+	 */
+	private List<ParsedApiRoute> parseExpressApiRoutes(List<String> lines, List<ParsedClass> classes) {
+		List<ParsedApiRoute> routes = new ArrayList<>();
+		String className = classes.isEmpty() ? null : classes.get(0).name();
+		for (int index = 0; index < lines.size(); index++) {
+			Matcher matcher = EXPRESS_ROUTE_PATTERN.matcher(lines.get(index));
+			while (matcher.find()) {
+				routes.add(new ParsedApiRoute(
+						matcher.group(1).toUpperCase(Locale.ROOT),
+						normalizeRoutePath(matcher.group(2)),
+						className,
+						findNearbyHandlerName(lines.get(index)),
+						index + 1));
+			}
+		}
+		return routes;
+	}
+
+	private String springHttpMethod(String annotation) {
+		return switch (annotation) {
+			case "GetMapping" -> "GET";
+			case "PostMapping" -> "POST";
+			case "PutMapping" -> "PUT";
+			case "DeleteMapping" -> "DELETE";
+			case "PatchMapping" -> "PATCH";
+			default -> "ANY";
+		};
+	}
+
+	private String extractAnnotationPath(String annotationArgs) {
+		if (!StringUtils.hasText(annotationArgs)) {
+			return "/";
+		}
+		Matcher matcher = Pattern.compile("(?:path|value)?\\s*=*\\s*\\{?\\s*\"([^\"]+)\"").matcher(annotationArgs);
+		return matcher.find() ? matcher.group(1) : "/";
+	}
+
+	private String findNextMethodName(List<String> lines, int startIndex) {
+		for (int index = startIndex; index < Math.min(lines.size(), startIndex + 8); index++) {
+			for (Pattern pattern : List.of(JAVA_LIKE_METHOD_PATTERN, FUNCTION_PATTERN, ARROW_FUNCTION_PATTERN)) {
+				Matcher matcher = pattern.matcher(lines.get(index));
+				if (matcher.find() && !isControlKeyword(matcher.group(1))) {
+					return matcher.group(1);
+				}
+			}
+		}
+		return null;
+	}
+
+	private String findNearbyHandlerName(String line) {
+		Matcher matcher = Pattern.compile(",\\s*([A-Za-z_$][\\w$]*)\\s*(?:\\)|,)").matcher(line);
+		return matcher.find() ? matcher.group(1) : null;
+	}
+
+	private String joinRoutePaths(String basePath, String routePath) {
+		String normalizedBasePath = normalizeRoutePath(basePath);
+		String normalizedRoutePath = normalizeRoutePath(routePath);
+		if ("/".equals(normalizedBasePath)) {
+			return normalizedRoutePath;
+		}
+		if ("/".equals(normalizedRoutePath)) {
+			return normalizedBasePath;
+		}
+		return normalizeRoutePath(normalizedBasePath + "/" + normalizedRoutePath);
+	}
+
+	private String normalizeRoutePath(String path) {
+		if (!StringUtils.hasText(path)) {
+			return "/";
+		}
+		String normalized = path.strip();
+		if (!normalized.startsWith("/")) {
+			normalized = "/" + normalized;
+		}
+		return normalized.replaceAll("/{2,}", "/");
 	}
 
 	/**
@@ -780,6 +711,124 @@ public class RepositoryScanService {
 	}
 
 	/**
+	 * Walks recognized dependency manifests and extracts external package inventory.
+	 */
+	private List<ExternalDependency> parseExternalDependencies(Path repoPath) {
+		try (var stream = Files.walk(repoPath)) {
+			return stream
+					.filter(Files::isRegularFile)
+					.filter(path -> !isSkipped(repoPath, path))
+					.filter(this::isDependencyManifest)
+					.flatMap(path -> parseExternalDependencyManifest(repoPath, path).stream())
+					.toList();
+		}
+		catch (IOException ex) {
+			throw new RepositoryScanException("Unable to walk dependency manifests.", ex);
+		}
+	}
+
+	private boolean isDependencyManifest(Path path) {
+		return DEPENDENCY_FILE_NAMES.contains(path.getFileName().toString().toLowerCase(Locale.ROOT));
+	}
+
+	private List<ExternalDependency> parseExternalDependencyManifest(Path repoPath, Path path) {
+		String relativePath = repoPath.relativize(path).toString().replace('\\', '/');
+		String fileName = path.getFileName().toString().toLowerCase(Locale.ROOT);
+		try {
+			return switch (fileName) {
+				case "package.json" -> parsePackageJson(relativePath, Files.readString(path, StandardCharsets.UTF_8));
+				case "requirements.txt" -> parseRequirementsTxt(relativePath, Files.readAllLines(path, StandardCharsets.UTF_8));
+				case "pom.xml" -> parseRegexDependencies(relativePath, "maven", Files.readString(path, StandardCharsets.UTF_8), "<artifactId>([^<]+)</artifactId>", "compile");
+				case "build.gradle", "build.gradle.kts" -> parseRegexDependencies(relativePath, "gradle", Files.readString(path, StandardCharsets.UTF_8), "['\"]([^:'\"]+:[^:'\"]+):([^'\"]+)['\"]", "implementation");
+				case "go.mod" -> parseRegexDependencies(relativePath, "go", Files.readString(path, StandardCharsets.UTF_8), "^\\s*([\\w./-]+)\\s+v([^\\s]+)", "require");
+				case "cargo.toml" -> parseRegexDependencies(relativePath, "cargo", Files.readString(path, StandardCharsets.UTF_8), "^\\s*([A-Za-z0-9_-]+)\\s*=", "dependencies");
+				case "composer.json" -> parseComposerJson(relativePath, Files.readString(path, StandardCharsets.UTF_8));
+				case "gemfile" -> parseRegexDependencies(relativePath, "bundler", Files.readString(path, StandardCharsets.UTF_8), "^\\s*gem\\s+['\"]([^'\"]+)['\"]\\s*(?:,\\s*['\"]([^'\"]+)['\"])?", "runtime");
+				default -> List.of();
+			};
+		}
+		catch (IOException ex) {
+			throw new RepositoryScanException("Unable to read dependency manifest: " + relativePath, ex);
+		}
+	}
+
+	private List<ExternalDependency> parsePackageJson(String manifestPath, String content) {
+		try {
+			JsonNode root = objectMapper.readTree(content);
+			List<ExternalDependency> dependencies = new ArrayList<>();
+			for (String scope : List.of("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")) {
+				JsonNode node = root.path(scope);
+				if (node.isObject()) {
+					node.fields().forEachRemaining(entry -> dependencies.add(new ExternalDependency(
+							manifestPath,
+							"npm",
+							entry.getKey(),
+							entry.getValue().asText(null),
+							scope)));
+				}
+			}
+			return dependencies;
+		}
+		catch (IOException ex) {
+			throw new RepositoryScanException("Unable to parse package.json: " + manifestPath, ex);
+		}
+	}
+
+	private List<ExternalDependency> parseComposerJson(String manifestPath, String content) {
+		try {
+			JsonNode root = objectMapper.readTree(content);
+			List<ExternalDependency> dependencies = new ArrayList<>();
+			for (String scope : List.of("require", "require-dev")) {
+				JsonNode node = root.path(scope);
+				if (node.isObject()) {
+					node.fields().forEachRemaining(entry -> dependencies.add(new ExternalDependency(
+							manifestPath,
+							"composer",
+							entry.getKey(),
+							entry.getValue().asText(null),
+							scope)));
+				}
+			}
+			return dependencies;
+		}
+		catch (IOException ex) {
+			throw new RepositoryScanException("Unable to parse composer.json: " + manifestPath, ex);
+		}
+	}
+
+	private List<ExternalDependency> parseRequirementsTxt(String manifestPath, List<String> lines) {
+		List<ExternalDependency> dependencies = new ArrayList<>();
+		Pattern requirementPattern = Pattern.compile("^\\s*([A-Za-z0-9_.-]+)\\s*([<>=!~].+)?$");
+		for (String line : lines) {
+			String cleaned = line.split("#", 2)[0].strip();
+			if (!StringUtils.hasText(cleaned) || cleaned.startsWith("-")) {
+				continue;
+			}
+			Matcher matcher = requirementPattern.matcher(cleaned);
+			if (matcher.find()) {
+				dependencies.add(new ExternalDependency(manifestPath, "pip", matcher.group(1), matcher.group(2), "runtime"));
+			}
+		}
+		return dependencies;
+	}
+
+	private List<ExternalDependency> parseRegexDependencies(
+			String manifestPath,
+			String manager,
+			String content,
+			String regex,
+			String scope) {
+		List<ExternalDependency> dependencies = new ArrayList<>();
+		Matcher matcher = Pattern.compile(regex, Pattern.MULTILINE).matcher(content);
+		while (matcher.find()) {
+			String packageName = matcher.group(1);
+			String versionSpec = matcher.groupCount() > 1 ? matcher.group(2) : null;
+			dependencies.add(new ExternalDependency(manifestPath, manager, packageName, versionSpec, scope));
+		}
+		return dependencies;
+	}
+
+	/**
 	 * Inserts or updates the repository row and returns its id.
 	 */
 	private long upsertRepository(String name, String url) {
@@ -887,139 +936,6 @@ public class RepositoryScanService {
 	}
 
 	/**
-	 * Finds the configured default branch commit when scanning a non-default branch.
-	 */
-	private Optional<String> findComparisonBaseCommitSha(long repositoryId, long branchId) {
-		return jdbcTemplate.query("""
-				SELECT default_branch.last_scanned_commit_sha
-				FROM branches current_branch
-				JOIN repositories repository ON repository.id = current_branch.repository_id
-				JOIN branches default_branch ON default_branch.repository_id = repository.id
-				    AND default_branch.id = repository.default_branch_id
-				WHERE current_branch.repository_id = ?
-				  AND current_branch.id = ?
-				  AND current_branch.id <> repository.default_branch_id
-				  AND default_branch.last_scanned_commit_sha IS NOT NULL
-				""", rs -> rs.next() ? Optional.of(rs.getString("last_scanned_commit_sha")) : Optional.empty(), repositoryId, branchId);
-	}
-
-	/**
-	 * Stores file-level changes for a branch scan compared to the default branch commit.
-	 */
-	private void insertFileChanges(Path repoPath, long scanRunId, String baseCommitSha, String headCommitSha) {
-		if (!StringUtils.hasText(baseCommitSha) || baseCommitSha.equals(headCommitSha)) {
-			return;
-		}
-		if (!gitObjectExists(repoPath, baseCommitSha) || !gitObjectExists(repoPath, headCommitSha)) {
-			return;
-		}
-
-		Map<String, FileChangeCounts> countsByPath = diffCountsByPath(repoPath, baseCommitSha, headCommitSha);
-		for (FileChange change : diffNameStatuses(repoPath, baseCommitSha, headCommitSha)) {
-			FileChangeCounts counts = countsByPath.getOrDefault(change.path(), new FileChangeCounts(0, 0));
-			jdbcTemplate.update("""
-					INSERT INTO file_changes (scan_run_id, path, old_path, change_type, additions, deletions)
-					VALUES (?, ?, ?, ?, ?, ?)
-					ON CONFLICT (scan_run_id, path) DO UPDATE
-					SET old_path = EXCLUDED.old_path,
-					    change_type = EXCLUDED.change_type,
-					    additions = EXCLUDED.additions,
-					    deletions = EXCLUDED.deletions
-					""", scanRunId, change.path(), change.oldPath(), change.changeType(), counts.additions(), counts.deletions());
-		}
-	}
-
-	/**
-	 * Returns whether a commit or tree-ish can be resolved locally.
-	 */
-	private boolean gitObjectExists(Path repoPath, String objectName) {
-		try {
-			runGit(repoPath, "cat-file", "-e", objectName);
-			return true;
-		}
-		catch (RepositoryScanException ex) {
-			return false;
-		}
-	}
-
-	/**
-	 * Parses git numstat output into addition/deletion counts keyed by the new path.
-	 */
-	private Map<String, FileChangeCounts> diffCountsByPath(Path repoPath, String baseCommitSha, String headCommitSha) {
-		String output = runGit(repoPath, "diff", "--numstat", "--find-renames", "--find-copies", baseCommitSha, headCommitSha);
-		Map<String, FileChangeCounts> countsByPath = new HashMap<>();
-		if (!StringUtils.hasText(output)) {
-			return countsByPath;
-		}
-		for (String line : output.lines().toList()) {
-			String[] parts = line.split("\\t");
-			if (parts.length < 3) {
-				continue;
-			}
-			String path = parts[parts.length - 1];
-			countsByPath.put(path, new FileChangeCounts(parseDiffCount(parts[0]), parseDiffCount(parts[1])));
-		}
-		return countsByPath;
-	}
-
-	/**
-	 * Parses git name-status output into file change records.
-	 */
-	private List<FileChange> diffNameStatuses(Path repoPath, String baseCommitSha, String headCommitSha) {
-		String output = runGit(repoPath, "diff", "--name-status", "--find-renames", "--find-copies", baseCommitSha, headCommitSha);
-		if (!StringUtils.hasText(output)) {
-			return List.of();
-		}
-		List<FileChange> changes = new ArrayList<>();
-		for (String line : output.lines().toList()) {
-			String[] parts = line.split("\\t");
-			if (parts.length < 2) {
-				continue;
-			}
-			String status = parts[0];
-			String changeType = changeType(status);
-			if (status.startsWith("R") || status.startsWith("C")) {
-				if (parts.length >= 3) {
-					changes.add(new FileChange(parts[2], parts[1], changeType));
-				}
-			}
-			else {
-				changes.add(new FileChange(parts[1], null, changeType));
-			}
-		}
-		return changes;
-	}
-
-	/**
-	 * Converts git name-status codes into the database change_type values.
-	 */
-	private String changeType(String status) {
-		if (status.startsWith("A")) {
-			return "added";
-		}
-		if (status.startsWith("D")) {
-			return "deleted";
-		}
-		if (status.startsWith("R")) {
-			return "renamed";
-		}
-		if (status.startsWith("C")) {
-			return "copied";
-		}
-		return "modified";
-	}
-
-	/**
-	 * Parses numstat counts, treating binary file markers as zero.
-	 */
-	private int parseDiffCount(String value) {
-		if ("-".equals(value)) {
-			return 0;
-		}
-		return Integer.parseInt(value);
-	}
-
-	/**
 	 * Stores one parsed source file and returns its id.
 	 */
 	private long insertSourceFile(long repositoryId, long branchId, long scanRunId, ParsedSourceFile file) {
@@ -1044,28 +960,166 @@ public class RepositoryScanService {
 	/**
 	 * Stores one parsed method under its parent class.
 	 */
-	private void insertMethod(long classId, ParsedMethod method) {
-		jdbcTemplate.update("""
+	private long insertMethod(long classId, ParsedMethod method) {
+		return queryForLong("""
 				INSERT INTO methods (class_id, name, loc, complexity)
 				VALUES (?, ?, ?, ?)
+				RETURNING id
 				""", classId, method.name(), method.loc(), method.complexity());
+	}
+
+	/**
+	 * Stores branch directory inventory derived from source file paths.
+	 */
+	private void insertProjectDirectories(long repositoryId, long branchId, long scanRunId, List<ParsedSourceFile> files) {
+		Set<String> directories = new java.util.TreeSet<>();
+		for (ParsedSourceFile file : files) {
+			String[] parts = file.path().split("/");
+			StringBuilder directory = new StringBuilder();
+			for (int index = 0; index < parts.length - 1; index++) {
+				if (directory.length() > 0) {
+					directory.append('/');
+				}
+				directory.append(parts[index]);
+				directories.add(directory.toString());
+			}
+		}
+		for (String directory : directories) {
+			jdbcTemplate.update("""
+					INSERT INTO project_directories (repository_id, branch_id, scan_run_id, path, parent_path, depth)
+					VALUES (?, ?, ?, ?, ?, ?)
+					ON CONFLICT (repository_id, branch_id, path) DO UPDATE
+					SET scan_run_id = EXCLUDED.scan_run_id,
+					    parent_path = EXCLUDED.parent_path,
+					    depth = EXCLUDED.depth
+					""", repositoryId, branchId, scanRunId, directory, parentDirectory(directory), directoryDepth(directory));
+		}
+	}
+
+	/**
+	 * Stores internal class dependency edges resolved from parsed imports.
+	 */
+	private int insertInternalDependencies(
+			List<ParsedSourceFile> files,
+			Map<String, Long> classIdsByName,
+			Map<String, Long> classIdsByPathAndName) {
+		int dependencyCount = 0;
+		for (ParsedSourceFile file : files) {
+			for (ParsedClass parsedClass : file.classes()) {
+				Long sourceClassId = classIdsByPathAndName.get(classKey(file.path(), parsedClass.name()));
+				if (sourceClassId == null) {
+					continue;
+				}
+				for (String imported : file.imports()) {
+					Long targetClassId = resolveImportedClass(imported, classIdsByName);
+					if (targetClassId != null && !targetClassId.equals(sourceClassId)) {
+						dependencyCount += jdbcTemplate.update("""
+								INSERT INTO dependencies (source_class, target_class, dependency_type)
+								VALUES (?, ?, 'import')
+								ON CONFLICT (source_class, target_class, dependency_type) DO NOTHING
+								""", sourceClassId, targetClassId);
+					}
+				}
+			}
+		}
+		return dependencyCount;
+	}
+
+	private Long resolveImportedClass(String imported, Map<String, Long> classIdsByName) {
+		String candidate = imported;
+		int dotIndex = candidate.lastIndexOf('.');
+		if (dotIndex >= 0) {
+			candidate = candidate.substring(dotIndex + 1);
+		}
+		int slashIndex = candidate.lastIndexOf('/');
+		if (slashIndex >= 0) {
+			candidate = candidate.substring(slashIndex + 1);
+		}
+		return classIdsByName.get(candidate);
+	}
+
+	/**
+	 * Stores API route inventory derived from source files.
+	 */
+	private int insertApiRoutes(
+			long repositoryId,
+			long branchId,
+			long scanRunId,
+			List<ParsedSourceFile> files,
+			Map<String, Long> fileIdsByPath,
+			Map<String, Long> classIdsByPathAndName,
+			Map<String, Long> methodIdsByPathClassAndName) {
+		int routeCount = 0;
+		for (ParsedSourceFile file : files) {
+			Long fileId = fileIdsByPath.get(file.path());
+			for (ParsedApiRoute route : file.apiRoutes()) {
+				Long classId = route.handlerClass() == null ? null : classIdsByPathAndName.get(classKey(file.path(), route.handlerClass()));
+				Long methodId = route.handlerClass() == null || route.handlerMethod() == null
+						? null
+						: methodIdsByPathClassAndName.get(methodKey(file.path(), route.handlerClass(), route.handlerMethod()));
+				routeCount += jdbcTemplate.update("""
+						INSERT INTO api_routes
+						    (repository_id, branch_id, scan_run_id, file_id, class_id, method_id, http_method, route_path, handler_class, handler_method, line_number)
+						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+						ON CONFLICT (repository_id, branch_id, http_method, route_path, file_id) DO UPDATE
+						SET scan_run_id = EXCLUDED.scan_run_id,
+						    class_id = EXCLUDED.class_id,
+						    method_id = EXCLUDED.method_id,
+						    handler_class = EXCLUDED.handler_class,
+						    handler_method = EXCLUDED.handler_method,
+						    line_number = EXCLUDED.line_number
+						""", repositoryId, branchId, scanRunId, fileId, classId, methodId,
+						route.httpMethod(), route.path(), route.handlerClass(), route.handlerMethod(), route.lineNumber());
+			}
+		}
+		return routeCount;
+	}
+
+	/**
+	 * Stores external package inventory from dependency manifests.
+	 */
+	private int insertExternalDependencies(
+			long repositoryId,
+			long branchId,
+			long scanRunId,
+			List<ExternalDependency> dependencies) {
+		int dependencyCount = 0;
+		for (ExternalDependency dependency : dependencies) {
+			dependencyCount += jdbcTemplate.update("""
+					INSERT INTO external_dependencies
+					    (repository_id, branch_id, scan_run_id, manifest_path, manager, package_name, version_spec, dependency_scope)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+					ON CONFLICT (repository_id, branch_id, manifest_path, manager, package_name, dependency_scope) DO UPDATE
+					SET scan_run_id = EXCLUDED.scan_run_id,
+					    version_spec = EXCLUDED.version_spec
+					""", repositoryId, branchId, scanRunId, dependency.manifestPath(), dependency.manager(),
+					dependency.packageName(), dependency.versionSpec(), dependency.scope());
+		}
+		return dependencyCount;
 	}
 
 	/**
 	 * Stores daily aggregate file, class, and method counts for the repository branch.
 	 */
-	private void upsertRepositoryMetrics(long repositoryId, long branchId, long scanRunId, int fileCount, int classCount, int methodCount) {
+	private void upsertRepositoryMetrics(
+			long repositoryId,
+			long branchId,
+			long scanRunId,
+			int fileCount,
+			int classCount,
+			int methodCount,
+			int dependencyCount) {
 		jdbcTemplate.update("""
 				INSERT INTO repository_metrics
 				    (repository_id, branch_id, scan_run_id, date, file_count, class_count, method_count, dependency_count)
-				VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (repository_id, branch_id, date) DO UPDATE
 				SET scan_run_id = EXCLUDED.scan_run_id,
 				    file_count = EXCLUDED.file_count,
 				    class_count = EXCLUDED.class_count,
 				    method_count = EXCLUDED.method_count,
 				    dependency_count = EXCLUDED.dependency_count
-				""", repositoryId, branchId, scanRunId, LocalDate.now(), fileCount, classCount, methodCount);
+				""", repositoryId, branchId, scanRunId, LocalDate.now(), fileCount, classCount, methodCount, dependencyCount);
 	}
 
 	/**
@@ -1106,12 +1160,21 @@ public class RepositoryScanService {
 		return StringUtils.hasText(candidate) ? candidate.strip() : fallback;
 	}
 
-	/**
-	 * Converts a local repository path into a file URI for repositories without remotes.
-	 */
-	private String toFileUri(Path path) {
-		URI uri = path.toUri();
-		return uri.toString();
+	private String parentDirectory(String directory) {
+		int slashIndex = directory.lastIndexOf('/');
+		return slashIndex > 0 ? directory.substring(0, slashIndex) : null;
+	}
+
+	private int directoryDepth(String directory) {
+		return (int) directory.chars().filter(character -> character == '/').count();
+	}
+
+	private String classKey(String path, String className) {
+		return path + "#" + className;
+	}
+
+	private String methodKey(String path, String className, String methodName) {
+		return path + "#" + className + "." + methodName;
 	}
 
 	private record GitInfo(
@@ -1123,7 +1186,13 @@ public class RepositoryScanService {
 			String committedAt) {
 	}
 
-	private record ParsedSourceFile(String path, String language, int loc, List<ParsedClass> classes) {
+	private record ParsedSourceFile(
+			String path,
+			String language,
+			int loc,
+			List<ParsedClass> classes,
+			List<String> imports,
+			List<ParsedApiRoute> apiRoutes) {
 	}
 
 	private record ParsedClass(String name, int loc, List<ParsedMethod> methods) {
@@ -1132,19 +1201,20 @@ public class RepositoryScanService {
 	private record ParsedMethod(String name, int loc, int complexity) {
 	}
 
-	private record FileChange(String path, String oldPath, String changeType) {
+	private record ParsedApiRoute(
+			String httpMethod,
+			String path,
+			String handlerClass,
+			String handlerMethod,
+			int lineNumber) {
 	}
 
-	private record FileChangeCounts(int additions, int deletions) {
-	}
-
-	private record BranchComparisonMetadata(
-			long scanRunId,
-			String branch,
-			String defaultBranch,
-			String baseCommitSha,
-			String headCommitSha,
-			OffsetDateTime scannedAt) {
+	private record ExternalDependency(
+			String manifestPath,
+			String manager,
+			String packageName,
+			String versionSpec,
+			String scope) {
 	}
 
 	private static class ParsedClassBuilder {

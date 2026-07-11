@@ -12,5 +12,8 @@ public record ParseRepositoryResponse(
 		String headCommitSha,
 		int fileCount,
 		int classCount,
-		int methodCount) {
+		int methodCount,
+		int dependencyCount,
+		int externalDependencyCount,
+		int apiRouteCount) {
 }

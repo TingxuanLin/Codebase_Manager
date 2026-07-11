@@ -15,18 +15,13 @@ type ScanResult = {
   methodCount: number;
 };
 
-type ParseSource = 'local' | 'github';
-
 // Renders the repository parser UI and coordinates requests to the backend.
 function App() {
   const [backendStatus, setBackendStatus] =
     useState<BackendStatus>('checking');
-  const [repoPath, setRepoPath] = useState('');
-  const [parseSource, setParseSource] = useState<ParseSource>('local');
   const [githubUrl, setGithubUrl] = useState('');
   const [githubBranch, setGithubBranch] = useState('');
   const [repoName, setRepoName] = useState('');
-  const [repoUrl, setRepoUrl] = useState('');
   const [isParsing, setIsParsing] = useState(false);
   const [error, setError] = useState('');
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
@@ -56,27 +51,14 @@ function App() {
     setScanResult(null);
 
     try {
-      const endpoint =
-        parseSource === 'local'
-          ? '/api/repositories/parse-local'
-          : '/api/repositories/parse-github';
-      const body =
-        parseSource === 'local'
-          ? {
-              path: repoPath,
-              name: repoName || undefined,
-              url: repoUrl || undefined,
-            }
-          : {
-              url: githubUrl,
-              branch: githubBranch || undefined,
-              name: repoName || undefined,
-            };
-
-      const response = await fetch(endpoint, {
+      const response = await fetch('/api/repositories/parse-github', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          url: githubUrl,
+          branch: githubBranch || undefined,
+          name: repoName || undefined,
+        }),
       });
 
       if (!response.ok) {
@@ -122,55 +104,26 @@ function App() {
         </div>
 
         <form className="parse-form" onSubmit={parseRepository}>
-          <div className="segmented-control" aria-label="Parse source">
-            <button
-              className={parseSource === 'local' ? 'is-active' : ''}
-              type="button"
-              onClick={() => setParseSource('local')}
-            >
-              Local
-            </button>
-            <button
-              className={parseSource === 'github' ? 'is-active' : ''}
-              type="button"
-              onClick={() => setParseSource('github')}
-            >
-              GitHub
-            </button>
-          </div>
-
-          {parseSource === 'local' ? (
+          <div className="field-grid field-grid--wide">
             <label>
-              <span>Repository path</span>
+              <span>GitHub URL</span>
               <input
-                value={repoPath}
-                onChange={(event) => setRepoPath(event.target.value)}
-                placeholder="/Users/name/project"
+                value={githubUrl}
+                onChange={(event) => setGithubUrl(event.target.value)}
+                placeholder="https://github.com/org/repo"
                 required
               />
             </label>
-          ) : (
-            <div className="field-grid field-grid--wide">
-              <label>
-                <span>GitHub URL</span>
-                <input
-                  value={githubUrl}
-                  onChange={(event) => setGithubUrl(event.target.value)}
-                  placeholder="https://github.com/org/repo"
-                  required
-                />
-              </label>
 
-              <label>
-                <span>Branch</span>
-                <input
-                  value={githubBranch}
-                  onChange={(event) => setGithubBranch(event.target.value)}
-                  placeholder="Default branch"
-                />
-              </label>
-            </div>
-          )}
+            <label>
+              <span>Branch</span>
+              <input
+                value={githubBranch}
+                onChange={(event) => setGithubBranch(event.target.value)}
+                placeholder="Default branch"
+              />
+            </label>
+          </div>
 
           <div className="field-grid">
             <label>
@@ -181,17 +134,6 @@ function App() {
                 placeholder="Derived from folder"
               />
             </label>
-
-            {parseSource === 'local' && (
-              <label>
-                <span>URL</span>
-                <input
-                  value={repoUrl}
-                  onChange={(event) => setRepoUrl(event.target.value)}
-                  placeholder="Derived from origin"
-                />
-              </label>
-            )}
           </div>
 
           <button type="submit" disabled={isParsing || backendStatus !== 'online'}>

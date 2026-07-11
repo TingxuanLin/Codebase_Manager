@@ -14,13 +14,13 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/repositories/{repositoryId}/branches")
 public class BranchController {
 
-	private final RepositoryScanService repositoryScanService;
+	private final BranchScanService branchScanService;
 
 	/**
 	 * Receives the service that owns stored branch queries.
 	 */
-	public BranchController(RepositoryScanService repositoryScanService) {
-		this.repositoryScanService = repositoryScanService;
+	public BranchController(BranchScanService branchScanService) {
+		this.branchScanService = branchScanService;
 	}
 
 	/**
@@ -31,7 +31,7 @@ public class BranchController {
 	public void deleteBranch(
 			@PathVariable long repositoryId,
 			@PathVariable long branchId) {
-		repositoryScanService.deleteBranch(repositoryId, branchId);
+		branchScanService.deleteBranch(repositoryId, branchId);
 	}
 
 	/**
@@ -42,7 +42,7 @@ public class BranchController {
 	public void setDefaultBranch(
 			@PathVariable long repositoryId,
 			@PathVariable long branchId) {
-		repositoryScanService.setDefaultBranch(repositoryId, branchId);
+		branchScanService.setDefaultBranch(repositoryId, branchId);
 	}
 
 	/**
@@ -52,6 +52,6 @@ public class BranchController {
 	public BranchComparisonResponse getBranchComparison(
 			@PathVariable long repositoryId,
 			@PathVariable long branchId) {
-		return repositoryScanService.getBranchComparison(repositoryId, branchId);
+		return branchScanService.getBranchComparison(repositoryId, branchId);
 	}
 }
