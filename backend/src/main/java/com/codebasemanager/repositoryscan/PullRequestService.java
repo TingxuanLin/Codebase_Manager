@@ -18,20 +18,24 @@ import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 
 @Service
 public class PullRequestService {
 
 	private final JdbcTemplate jdbcTemplate;
+	private final TransactionTemplate transactionTemplate;
 	private final ObjectMapper objectMapper = new ObjectMapper();
 	private final HttpClient httpClient = HttpClient.newHttpClient();
+	private final String githubToken = System.getenv("GITHUB_TOKEN");
 
 	/**
 	 * Receives the JDBC helper used to read repositories and store discovered pull requests.
 	 */
-	public PullRequestService(JdbcTemplate jdbcTemplate) {
+	public PullRequestService(JdbcTemplate jdbcTemplate, TransactionTemplate transactionTemplate) {
 		this.jdbcTemplate = jdbcTemplate;
+		this.transactionTemplate = transactionTemplate;
 	}
 
 	/**
@@ -65,22 +69,20 @@ public class PullRequestService {
 	/**
 	 * Lists all pull requests from GitHub without writing them to the database.
 	 */
-	@Transactional(readOnly = true)
 	public List<PullRequestSummaryResponse> listAllPullRequests(long repositoryId) {
 		RepositoryPullRequestTarget target = findRepositoryPullRequestTarget(repositoryId);
 		GitHubRepositoryPath repositoryPath = parseGitHubRepositoryPath(target.url());
-		return fetchPullRequests(target, repositoryPath, "all", false);
+		return fetchPullRequests(target, repositoryPath, "all");
 	}
 
 	/**
 	 * Checks GitHub for open pull requests targeting the repository default branch and stores the latest open set.
 	 */
-	@Transactional
 	public PullRequestCheckResponse checkForNewPullRequests(long repositoryId) {
 		RepositoryPullRequestTarget target = findRepositoryPullRequestTarget(repositoryId);
 		GitHubRepositoryPath repositoryPath = parseGitHubRepositoryPath(target.url());
-		List<PullRequestSummaryResponse> pullRequests = fetchPullRequests(target, repositoryPath, "open", true);
-		deletePullRequestsNotInOpenSet(target, pullRequests);
+		List<PullRequestSummaryResponse> fetchedPullRequests = fetchPullRequests(target, repositoryPath, "open");
+		List<PullRequestSummaryResponse> pullRequests = syncOpenPullRequests(target, fetchedPullRequests);
 		int newPullRequestCount = 0;
 		for (PullRequestSummaryResponse pullRequest : pullRequests) {
 			if (pullRequest.newlySeen()) {
@@ -128,38 +130,25 @@ public class PullRequestService {
 	private List<PullRequestSummaryResponse> fetchPullRequests(
 			RepositoryPullRequestTarget target,
 			GitHubRepositoryPath repositoryPath,
-			String state,
-			boolean store) {
+			String state) {
 		String encodedBaseBranch = URLEncoder.encode(target.defaultBranch(), StandardCharsets.UTF_8);
 		String encodedState = URLEncoder.encode(state, StandardCharsets.UTF_8);
 		URI uri = URI.create("https://api.github.com/repos/%s/%s/pulls?state=%s&base=%s&per_page=100"
 				.formatted(repositoryPath.owner(), repositoryPath.name(), encodedState, encodedBaseBranch));
-		HttpRequest.Builder requestBuilder = HttpRequest.newBuilder(uri)
-				.header("Accept", "application/vnd.github+json")
-				.header("User-Agent", "Codebase-Manager")
-				.GET();
-		String githubToken = System.getenv("GITHUB_TOKEN");
-		if (StringUtils.hasText(githubToken)) {
-			requestBuilder.header("Authorization", "Bearer " + githubToken.strip());
-		}
+		List<PullRequestSummaryResponse> pullRequests = new ArrayList<>();
 
 		try {
-			HttpResponse<String> response = httpClient.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString());
-			if (response.statusCode() != 200) {
-				throw new RepositoryScanException("GitHub pull request check failed with status " + response.statusCode() + ": " + response.body());
-			}
-			JsonNode root = objectMapper.readTree(response.body());
-			if (!root.isArray()) {
-				throw new RepositoryScanException("GitHub pull request response was not an array.");
-			}
-			List<PullRequestSummaryResponse> pullRequests = new ArrayList<>();
-			for (JsonNode pullRequestNode : root) {
-				if (store) {
-					pullRequests.add(upsertPullRequest(target, pullRequestNode));
+			URI nextPageUri = uri;
+			while (nextPageUri != null) {
+				HttpResponse<String> response = sendGitHubGet(nextPageUri);
+				JsonNode root = objectMapper.readTree(response.body());
+				if (!root.isArray()) {
+					throw new RepositoryScanException("GitHub pull request response was not an array.");
 				}
-				else {
+				for (JsonNode pullRequestNode : root) {
 					pullRequests.add(toPullRequestSummary(pullRequestNode, false));
 				}
+				nextPageUri = nextPageUri(response);
 			}
 			return pullRequests;
 		}
@@ -172,8 +161,63 @@ public class PullRequestService {
 		}
 	}
 
-	private PullRequestSummaryResponse upsertPullRequest(RepositoryPullRequestTarget target, JsonNode node) {
-		PullRequestSummaryResponse pullRequest = toPullRequestSummary(node, false);
+	private List<PullRequestSummaryResponse> syncOpenPullRequests(
+			RepositoryPullRequestTarget target,
+			List<PullRequestSummaryResponse> fetchedPullRequests) {
+		return transactionTemplate.execute(status -> {
+			List<PullRequestSummaryResponse> storedPullRequests = new ArrayList<>();
+			for (PullRequestSummaryResponse pullRequest : fetchedPullRequests) {
+				storedPullRequests.add(upsertPullRequest(target, pullRequest));
+			}
+			deletePullRequestsNotInOpenSet(target, storedPullRequests);
+			return storedPullRequests;
+		});
+	}
+
+	private HttpResponse<String> sendGitHubGet(URI uri) throws IOException, InterruptedException {
+		HttpRequest.Builder requestBuilder = HttpRequest.newBuilder(uri)
+				.header("Accept", "application/vnd.github+json")
+				.header("User-Agent", "Codebase-Manager")
+				.GET();
+		if (StringUtils.hasText(githubToken)) {
+			requestBuilder.header("Authorization", "Bearer " + githubToken.strip());
+		}
+		HttpResponse<String> response = httpClient.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString());
+		if (response.statusCode() != 200) {
+			throw new RepositoryScanException("GitHub pull request check failed with status " + response.statusCode() + ": " + response.body());
+		}
+		return response;
+	}
+
+	private URI nextPageUri(HttpResponse<?> response) {
+		return response.headers()
+				.firstValue("Link")
+				.flatMap(this::extractNextPageUri)
+				.orElse(null);
+	}
+
+	private java.util.Optional<URI> extractNextPageUri(String linkHeader) {
+		for (String linkPart : linkHeader.split(",")) {
+			String[] sections = linkPart.split(";");
+			if (sections.length < 2) {
+				continue;
+			}
+			String uriSection = sections[0].strip();
+			boolean next = false;
+			for (int index = 1; index < sections.length; index++) {
+				if ("rel=\"next\"".equals(sections[index].strip())) {
+					next = true;
+					break;
+				}
+			}
+			if (next && uriSection.startsWith("<") && uriSection.endsWith(">")) {
+				return java.util.Optional.of(URI.create(uriSection.substring(1, uriSection.length() - 1)));
+			}
+		}
+		return java.util.Optional.empty();
+	}
+
+	private PullRequestSummaryResponse upsertPullRequest(RepositoryPullRequestTarget target, PullRequestSummaryResponse pullRequest) {
 		int number = pullRequest.number();
 		boolean newlySeen = !pullRequestExists(target.repositoryId(), number);
 
