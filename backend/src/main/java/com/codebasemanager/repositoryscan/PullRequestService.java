@@ -1,6 +1,8 @@
 package com.codebasemanager.repositoryscan;
 
 import com.codebasemanager.repositoryscan.dto.PullRequestCheckResponse;
+import com.codebasemanager.repositoryscan.dto.PullRequestDiffResponse;
+import com.codebasemanager.repositoryscan.dto.PullRequestFileChangeResponse;
 import com.codebasemanager.repositoryscan.dto.PullRequestSummaryResponse;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -14,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -82,7 +85,12 @@ public class PullRequestService {
 		RepositoryPullRequestTarget target = findRepositoryPullRequestTarget(repositoryId);
 		GitHubRepositoryPath repositoryPath = parseGitHubRepositoryPath(target.url());
 		List<PullRequestSummaryResponse> fetchedPullRequests = fetchPullRequests(target, repositoryPath, "open");
-		List<PullRequestSummaryResponse> pullRequests = syncOpenPullRequests(target, fetchedPullRequests);
+		PullRequestSyncResult syncResult = syncOpenPullRequests(target, fetchedPullRequests);
+		for (PullRequestDiffRefreshRequest refreshRequest : syncResult.diffRefreshRequests()) {
+			List<PullRequestFileChangeResponse> fileChanges = fetchPullRequestFileChanges(repositoryPath, refreshRequest.number());
+			storePullRequestFileChanges(target.repositoryId(), refreshRequest.number(), fileChanges);
+		}
+		List<PullRequestSummaryResponse> pullRequests = syncResult.pullRequests();
 		int newPullRequestCount = 0;
 		for (PullRequestSummaryResponse pullRequest : pullRequests) {
 			if (pullRequest.newlySeen()) {
@@ -96,6 +104,46 @@ public class PullRequestService {
 				pullRequests.size(),
 				newPullRequestCount,
 				pullRequests);
+	}
+
+	/**
+	 * Returns a stored pull request with its latest persisted file-level diff.
+	 */
+	@Transactional(readOnly = true)
+	public PullRequestDiffResponse getStoredPullRequestDiff(long repositoryId, int pullRequestNumber) {
+		ensureRepositoryExists(repositoryId);
+		StoredPullRequest pullRequest = findStoredPullRequest(repositoryId, pullRequestNumber);
+		List<PullRequestFileChangeResponse> changes = jdbcTemplate.query("""
+				SELECT path, old_path, change_type, additions, deletions, changes, patch, blob_url, raw_url
+				FROM pull_request_file_changes
+				WHERE pull_request_id = ?
+				ORDER BY path
+				""", (rs, rowNum) -> new PullRequestFileChangeResponse(
+				rs.getString("path"),
+				rs.getString("old_path"),
+				rs.getString("change_type"),
+				rs.getInt("additions"),
+				rs.getInt("deletions"),
+				rs.getInt("changes"),
+				rs.getString("patch"),
+				rs.getString("blob_url"),
+				rs.getString("raw_url")), pullRequest.id());
+		int additions = changes.stream().mapToInt(PullRequestFileChangeResponse::additions).sum();
+		int deletions = changes.stream().mapToInt(PullRequestFileChangeResponse::deletions).sum();
+		return new PullRequestDiffResponse(
+				repositoryId,
+				pullRequest.number(),
+				pullRequest.title(),
+				pullRequest.state(),
+				pullRequest.baseBranch(),
+				pullRequest.headBranch(),
+				pullRequest.baseSha(),
+				pullRequest.headSha(),
+				pullRequest.diffFetchedAt(),
+				changes.size(),
+				additions,
+				deletions,
+				changes);
 	}
 
 	private void ensureRepositoryExists(long repositoryId) {
@@ -161,16 +209,21 @@ public class PullRequestService {
 		}
 	}
 
-	private List<PullRequestSummaryResponse> syncOpenPullRequests(
+	private PullRequestSyncResult syncOpenPullRequests(
 			RepositoryPullRequestTarget target,
 			List<PullRequestSummaryResponse> fetchedPullRequests) {
 		return transactionTemplate.execute(status -> {
 			List<PullRequestSummaryResponse> storedPullRequests = new ArrayList<>();
+			List<PullRequestDiffRefreshRequest> diffRefreshRequests = new ArrayList<>();
 			for (PullRequestSummaryResponse pullRequest : fetchedPullRequests) {
+				StoredPullRequest existingPullRequest = findStoredPullRequestOrNull(target.repositoryId(), pullRequest.number());
 				storedPullRequests.add(upsertPullRequest(target, pullRequest));
+				if (shouldRefreshDiff(existingPullRequest, pullRequest)) {
+					diffRefreshRequests.add(new PullRequestDiffRefreshRequest(pullRequest.number()));
+				}
 			}
 			deletePullRequestsNotInOpenSet(target, storedPullRequests);
-			return storedPullRequests;
+			return new PullRequestSyncResult(storedPullRequests, diffRefreshRequests);
 		});
 	}
 
@@ -187,6 +240,68 @@ public class PullRequestService {
 			throw new RepositoryScanException("GitHub pull request check failed with status " + response.statusCode() + ": " + response.body());
 		}
 		return response;
+	}
+
+	private List<PullRequestFileChangeResponse> fetchPullRequestFileChanges(
+			GitHubRepositoryPath repositoryPath,
+			int pullRequestNumber) {
+		URI uri = URI.create("https://api.github.com/repos/%s/%s/pulls/%d/files?per_page=100"
+				.formatted(repositoryPath.owner(), repositoryPath.name(), pullRequestNumber));
+		List<PullRequestFileChangeResponse> fileChanges = new ArrayList<>();
+
+		try {
+			URI nextPageUri = uri;
+			while (nextPageUri != null) {
+				HttpResponse<String> response = sendGitHubGet(nextPageUri);
+				JsonNode root = objectMapper.readTree(response.body());
+				if (!root.isArray()) {
+					throw new RepositoryScanException("GitHub pull request files response was not an array.");
+				}
+				for (JsonNode fileNode : root) {
+					fileChanges.add(toPullRequestFileChange(fileNode));
+				}
+				nextPageUri = nextPageUri(response);
+			}
+			return fileChanges;
+		}
+		catch (IOException ex) {
+			throw new RepositoryScanException("Unable to fetch GitHub pull request diff.", ex);
+		}
+		catch (InterruptedException ex) {
+			Thread.currentThread().interrupt();
+			throw new RepositoryScanException("GitHub pull request diff fetch was interrupted.", ex);
+		}
+	}
+
+	private void storePullRequestFileChanges(
+			long repositoryId,
+			int pullRequestNumber,
+			List<PullRequestFileChangeResponse> fileChanges) {
+		transactionTemplate.executeWithoutResult(status -> {
+			StoredPullRequest pullRequest = findStoredPullRequest(repositoryId, pullRequestNumber);
+			for (PullRequestFileChangeResponse fileChange : fileChanges) {
+				jdbcTemplate.update("""
+						INSERT INTO pull_request_file_changes
+						    (pull_request_id, path, old_path, change_type, additions, deletions,
+						     changes, patch, blob_url, raw_url)
+						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+						ON CONFLICT (pull_request_id, path) DO UPDATE
+						SET old_path = EXCLUDED.old_path,
+						    change_type = EXCLUDED.change_type,
+						    additions = EXCLUDED.additions,
+						    deletions = EXCLUDED.deletions,
+						    changes = EXCLUDED.changes,
+						    patch = EXCLUDED.patch,
+						    blob_url = EXCLUDED.blob_url,
+						    raw_url = EXCLUDED.raw_url,
+						    last_seen_at = NOW()
+						""", pullRequest.id(), fileChange.path(), fileChange.oldPath(), fileChange.changeType(),
+						fileChange.additions(), fileChange.deletions(), fileChange.changes(), fileChange.patch(),
+						fileChange.blobUrl(), fileChange.rawUrl());
+			}
+			deletePullRequestFilesNotInDiff(pullRequest.id(), fileChanges);
+			jdbcTemplate.update("UPDATE pull_requests SET diff_fetched_at = NOW() WHERE id = ?", pullRequest.id());
+		});
 	}
 
 	private URI nextPageUri(HttpResponse<?> response) {
@@ -256,6 +371,19 @@ public class PullRequestService {
 				newlySeen);
 	}
 
+	private PullRequestFileChangeResponse toPullRequestFileChange(JsonNode node) {
+		return new PullRequestFileChangeResponse(
+				node.path("filename").asText(),
+				textOrNull(node.path("previous_filename")),
+				node.path("status").asText("modified"),
+				node.path("additions").asInt(0),
+				node.path("deletions").asInt(0),
+				node.path("changes").asInt(0),
+				textOrNull(node.path("patch")),
+				textOrNull(node.path("blob_url")),
+				textOrNull(node.path("raw_url")));
+	}
+
 	private PullRequestSummaryResponse toPullRequestSummary(JsonNode node, boolean newlySeen) {
 		return new PullRequestSummaryResponse(
 				node.path("number").asInt(),
@@ -289,6 +417,27 @@ public class PullRequestService {
 				""", target.repositoryId(), target.defaultBranch(), openNumbers.toArray(Integer[]::new));
 	}
 
+	private void deletePullRequestFilesNotInDiff(long pullRequestId, List<PullRequestFileChangeResponse> fileChanges) {
+		List<String> paths = fileChanges.stream()
+				.map(PullRequestFileChangeResponse::path)
+				.toList();
+		if (paths.isEmpty()) {
+			jdbcTemplate.update("DELETE FROM pull_request_file_changes WHERE pull_request_id = ?", pullRequestId);
+			return;
+		}
+		jdbcTemplate.update("""
+				DELETE FROM pull_request_file_changes
+				WHERE pull_request_id = ?
+				  AND path <> ALL (?::text[])
+				""", pullRequestId, paths.toArray(String[]::new));
+	}
+
+	private boolean shouldRefreshDiff(StoredPullRequest existingPullRequest, PullRequestSummaryResponse pullRequest) {
+		return existingPullRequest == null
+				|| existingPullRequest.diffFetchedAt() == null
+				|| !Objects.equals(existingPullRequest.headSha(), pullRequest.headSha());
+	}
+
 	private boolean pullRequestExists(long repositoryId, int number) {
 		Integer count = jdbcTemplate.queryForObject(
 				"SELECT COUNT(*) FROM pull_requests WHERE repository_id = ? AND github_pr_number = ?",
@@ -296,6 +445,38 @@ public class PullRequestService {
 				repositoryId,
 				number);
 		return count != null && count > 0;
+	}
+
+	private StoredPullRequest findStoredPullRequest(long repositoryId, int number) {
+		StoredPullRequest pullRequest = findStoredPullRequestOrNull(repositoryId, number);
+		if (pullRequest == null) {
+			throw new RepositoryResourceNotFoundException("Pull request not found for repository: " + number);
+		}
+		return pullRequest;
+	}
+
+	private StoredPullRequest findStoredPullRequestOrNull(long repositoryId, int number) {
+		try {
+			return jdbcTemplate.queryForObject("""
+					SELECT id, github_pr_number, title, state, base_branch, head_branch,
+					       base_sha, head_sha, diff_fetched_at
+					FROM pull_requests
+					WHERE repository_id = ?
+					  AND github_pr_number = ?
+					""", (rs, rowNum) -> new StoredPullRequest(
+					rs.getLong("id"),
+					rs.getInt("github_pr_number"),
+					rs.getString("title"),
+					rs.getString("state"),
+					rs.getString("base_branch"),
+					rs.getString("head_branch"),
+					rs.getString("base_sha"),
+					rs.getString("head_sha"),
+					rs.getObject("diff_fetched_at", OffsetDateTime.class)), repositoryId, number);
+		}
+		catch (EmptyResultDataAccessException ex) {
+			return null;
+		}
 	}
 
 	private GitHubRepositoryPath parseGitHubRepositoryPath(String url) {
@@ -341,5 +522,25 @@ public class PullRequestService {
 	}
 
 	private record GitHubRepositoryPath(String owner, String name) {
+	}
+
+	private record PullRequestSyncResult(
+			List<PullRequestSummaryResponse> pullRequests,
+			List<PullRequestDiffRefreshRequest> diffRefreshRequests) {
+	}
+
+	private record PullRequestDiffRefreshRequest(int number) {
+	}
+
+	private record StoredPullRequest(
+			long id,
+			int number,
+			String title,
+			String state,
+			String baseBranch,
+			String headBranch,
+			String baseSha,
+			String headSha,
+			OffsetDateTime diffFetchedAt) {
 	}
 }

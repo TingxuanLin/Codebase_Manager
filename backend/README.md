@@ -48,33 +48,21 @@ Useful endpoints:
 GET /
 GET /actuator/health
 GET /repositories
-POST /repositories/parse-local
 POST /repositories/parse-github
+GET /repositories/github-branches?url={githubRepositoryUrl}
 PATCH /repositories/{repositoryId}/branches/{branchId}/default
 GET /repositories/{repositoryId}/branches/{branchId}/comparison
 DELETE /repositories/{repositoryId}/branches/{branchId}
+POST /repositories/{repositoryId}/pull-requests/check
+GET /repositories/{repositoryId}/pull-requests
+GET /repositories/{repositoryId}/pull-requests/all
+GET /repositories/{repositoryId}/pull-requests/{pullRequestNumber}/diff
 ```
 
 ## Parse and Store a Repository
 
-The parser stores repository, branch, commit, scan run, source file, class, method, and metric rows.
+The parser stores repository, branch, commit, scan run, source file, class, method, route, dependency, directory, and metric rows.
 When a non-default branch is parsed, the scan run is compared against the configured default branch commit and file-level changes are stored in `file_changes`.
-
-### Local Repository
-
-Use this when the repository already exists on the machine running the backend.
-
-```bash
-curl -X POST http://localhost:8080/repositories/parse-local \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "path": "/absolute/path/to/repo",
-    "name": "Optional display name",
-    "url": "Optional canonical repository URL"
-  }'
-```
-
-`name` defaults to the folder name. `url` defaults to `remote.origin.url`, then the local file URI if no origin exists.
 
 ### GitHub Repository
 
@@ -93,6 +81,22 @@ curl -X POST http://localhost:8080/repositories/parse-github \
 `branch` and `name` are optional. If `branch` is omitted, the backend checks out the remote default branch. Repositories are cached under `~/.codebase-manager/repositories` by default. Set `CODEBASE_REPOSITORY_CACHE_DIR` to use another location.
 
 For private repositories, configure local Git credentials, SSH keys, or a credential manager for the backend process.
+
+### Pull Requests
+
+Check GitHub for open pull requests targeting the stored default branch and persist newly seen PRs:
+
+```bash
+curl -X POST http://localhost:8080/repositories/1/pull-requests/check
+```
+
+When a PR is new or its head SHA changes, the backend stores file-level diff metadata and patch text in `pull_request_file_changes`.
+
+Read the stored diff with:
+
+```bash
+curl http://localhost:8080/repositories/1/pull-requests/7/diff
+```
 
 ### Set Default Branch
 
@@ -131,8 +135,8 @@ src/main/resources/db/migration/V1__initial_schema.sql
 Add new schema changes as a new migration file:
 
 ```text
-src/main/resources/db/migration/V2__description.sql
-src/main/resources/db/migration/V3__description.sql
+src/main/resources/db/migration/V6__description.sql
+src/main/resources/db/migration/V7__description.sql
 ```
 
 Do not edit a migration after it has already run locally. Create the next version instead.

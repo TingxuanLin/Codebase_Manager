@@ -1,6 +1,7 @@
 package com.codebasemanager.repositoryscan;
 
 import com.codebasemanager.repositoryscan.dto.PullRequestCheckResponse;
+import com.codebasemanager.repositoryscan.dto.PullRequestDiffResponse;
 import com.codebasemanager.repositoryscan.dto.PullRequestSummaryResponse;
 import java.util.List;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -28,6 +29,16 @@ public class PullRequestController {
 	@GetMapping
 	public List<PullRequestSummaryResponse> listPullRequests(@PathVariable long repositoryId) {
 		return pullRequestService.listStoredOpenPullRequests(repositoryId);
+	}
+
+	/**
+	 * Returns the stored file-level diff for one pull request.
+	 */
+	@GetMapping("/{pullRequestNumber}/diff")
+	public PullRequestDiffResponse getPullRequestDiff(
+			@PathVariable long repositoryId,
+			@PathVariable int pullRequestNumber) {
+		return pullRequestService.getStoredPullRequestDiff(repositoryId, pullRequestNumber);
 	}
 
 	/**
