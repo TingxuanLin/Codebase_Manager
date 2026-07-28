@@ -57,6 +57,7 @@ POST /repositories/{repositoryId}/pull-requests/check
 GET /repositories/{repositoryId}/pull-requests
 GET /repositories/{repositoryId}/pull-requests/all
 GET /repositories/{repositoryId}/pull-requests/{pullRequestNumber}/diff
+GET /repositories/{repositoryId}/pull-requests/{pullRequestNumber}/risk
 ```
 
 ## Parse and Store a Repository
@@ -97,6 +98,14 @@ Read the stored diff with:
 ```bash
 curl http://localhost:8080/repositories/1/pull-requests/7/diff
 ```
+
+Run the basic rule-based risk analysis with:
+
+```bash
+curl http://localhost:8080/repositories/1/pull-requests/7/risk
+```
+
+The MVP risk analyzer uses stored PR file changes plus parsed repository inventory. It scores change volume, code churn, dependency manifest edits, sensitive paths, deleted files, API route impact, large files, and internal dependency fanout.
 
 ### Set Default Branch
 
