@@ -1,6 +1,8 @@
 package com.codebasemanager.repositoryscan;
 
 import com.codebasemanager.repositoryscan.dto.BranchComparisonResponse;
+import com.codebasemanager.repositoryscan.dto.BranchSummaryResponse;
+import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -21,6 +23,14 @@ public class BranchController {
 	 */
 	public BranchController(BranchScanService branchScanService) {
 		this.branchScanService = branchScanService;
+	}
+
+	/**
+	 * Lists all stored branches for a repository.
+	 */
+	@GetMapping
+	public List<BranchSummaryResponse> listBranches(@PathVariable long repositoryId) {
+		return branchScanService.listBranches(repositoryId);
 	}
 
 	/**

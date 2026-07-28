@@ -1,6 +1,7 @@
 package com.codebasemanager.repositoryscan;
 
 import com.codebasemanager.repositoryscan.dto.BranchComparisonResponse;
+import com.codebasemanager.repositoryscan.dto.BranchSummaryResponse;
 import com.codebasemanager.repositoryscan.dto.FileChangeResponse;
 import com.codebasemanager.repositoryscan.dto.GitHubBranchResponse;
 import java.io.BufferedReader;
@@ -65,6 +66,29 @@ public class BranchScanService {
 		String defaultBranch = remoteDefaultBranch(repoPath);
 		runGit(repoPath, "checkout", "-B", defaultBranch, "origin/" + defaultBranch);
 		runGit(repoPath, "pull", "--ff-only");
+	}
+
+	/**
+	 * Lists all stored branches for a repository, most recently updated first.
+	 */
+	@Transactional(readOnly = true)
+	public List<BranchSummaryResponse> listBranches(long repositoryId) {
+		if (!repositoryExists(repositoryId)) {
+			throw new RepositoryResourceNotFoundException("Repository not found: " + repositoryId);
+		}
+
+		return jdbcTemplate.query("""
+				SELECT id, name, is_default, last_scanned_commit_sha
+				FROM branches
+				WHERE repository_id = ?
+				ORDER BY is_default DESC, updated_at DESC
+				""",
+				(resultSet, rowNumber) -> new BranchSummaryResponse(
+						resultSet.getLong("id"),
+						resultSet.getString("name"),
+						resultSet.getBoolean("is_default"),
+						resultSet.getString("last_scanned_commit_sha")),
+				repositoryId);
 	}
 
 	/**
