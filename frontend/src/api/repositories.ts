@@ -1,4 +1,6 @@
 import type {
+  BranchComparison,
+  BranchSummary,
   ImportRepositoryPayload,
   ParseRepositoryResponse,
   PullRequestCheckResponse,
@@ -86,6 +88,39 @@ export async function deleteRepository(repositoryId: number) {
   if (!response.ok) {
     throw new Error(await readError(response));
   }
+}
+
+export async function fetchBranches(
+  repositoryId: number,
+  signal?: AbortSignal,
+) {
+  const response = await fetch(
+    `/api/repositories/${repositoryId}/branches`,
+    { signal },
+  );
+
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+
+  return (await response.json()) as BranchSummary[];
+}
+
+export async function fetchBranchComparison(
+  repositoryId: number,
+  branchId: number,
+  signal?: AbortSignal,
+) {
+  const response = await fetch(
+    `/api/repositories/${repositoryId}/branches/${branchId}/comparison`,
+    { signal },
+  );
+
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+
+  return (await response.json()) as BranchComparison;
 }
 
 export async function fetchPullRequests(

@@ -58,6 +58,36 @@ export type PullRequestSummary = {
   newlySeen: boolean;
 };
 
+export type BranchSummary = {
+  id: number;
+  name: string;
+  isDefault: boolean;
+  lastScannedCommitSha?: string | null;
+};
+
+export type BranchComparison = {
+  repositoryId: number;
+  branchId: number;
+  scanRunId: number;
+  branch: string;
+  defaultBranch: string;
+  baseCommitSha?: string | null;
+  headCommitSha: string;
+  scannedAt?: string | null;
+  changedFileCount: number;
+  additions: number;
+  deletions: number;
+  changes: FileChange[];
+};
+
+export type FileChange = {
+  path: string;
+  oldPath?: string | null;
+  changeType: string;
+  additions: number;
+  deletions: number;
+};
+
 export type PullRequestCheckResponse = {
   repositoryId: number;
   repositoryUrl: string;
