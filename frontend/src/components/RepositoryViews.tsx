@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   ArrowRightLeft,
@@ -18,11 +18,17 @@ import {
 } from 'lucide-react';
 import {
   deleteRepository,
+  fetchBranchComparison,
+  fetchBranches,
   rescanRepository,
 } from '../api/repositories';
 import { normalizeScanStatus } from '../utils/scanStatus';
 import { useRepositories } from '../hooks/useRepositories';
-import type { RepositorySummary } from '../types/repository';
+import type {
+  BranchComparison,
+  BranchSummary,
+  RepositorySummary,
+} from '../types/repository';
 import { Breadcrumbs } from './Breadcrumbs';
 import { DismissibleAlert } from './DismissibleAlert';
 import { PullRequestsTab } from './PullRequestsTab';
@@ -414,38 +420,150 @@ function RepositoryDetail({ repository }: RepositoryDetailProps) {
 }
 
 function BranchComparisonTab({ repository }: RepositoryDetailProps) {
+  const [branches, setBranches] = useState<BranchSummary[]>([]);
+  const [selectedBranchId, setSelectedBranchId] = useState<number | null>(null);
+  const [isLoadingBranches, setIsLoadingBranches] = useState(true);
+  const [branchError, setBranchError] = useState('');
+
+  const [comparison, setComparison] = useState<BranchComparison | null>(null);
+  const [isComparing, setIsComparing] = useState(false);
+  const [comparisonError, setComparisonError] = useState('');
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    fetchBranches(repository.id, controller.signal)
+      .then((nextBranches) => {
+        setBranches(nextBranches);
+        const nonDefault = nextBranches.find((branch) => !branch.isDefault);
+        setSelectedBranchId((nonDefault ?? nextBranches[0])?.id ?? null);
+      })
+      .catch((error) => {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          return;
+        }
+        setBranchError(
+          error instanceof Error ? error.message : 'Unable to load branches.',
+        );
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsLoadingBranches(false);
+        }
+      });
+
+    return () => controller.abort();
+  }, [repository.id]);
+
+  const defaultBranch = branches.find((branch) => branch.isDefault);
+
+  async function handleRunComparison() {
+    if (selectedBranchId === null) {
+      return;
+    }
+
+    setIsComparing(true);
+    setComparisonError('');
+
+    try {
+      const result = await fetchBranchComparison(repository.id, selectedBranchId);
+      setComparison(result);
+    } catch (error) {
+      setComparisonError(
+        error instanceof Error ? error.message : 'Unable to load branch comparison.',
+      );
+    } finally {
+      setIsComparing(false);
+    }
+  }
+
   return (
     <div className="module-stack">
       <div className="comparison-control">
         <label>
           <span>Base</span>
-          <select defaultValue={repository.defaultBranch || 'main'}>
-            <option>{repository.defaultBranch || 'main'}</option>
+          <select value={defaultBranch?.name ?? ''} disabled>
+            <option>{defaultBranch?.name ?? 'No default branch'}</option>
           </select>
         </label>
         <ArrowRightLeft aria-hidden="true" size={20} />
         <label>
           <span>Compare</span>
-          <select defaultValue={repository.latestBranch || 'feature/current'}>
-            <option>{repository.latestBranch || 'feature/current'}</option>
+          <select
+            value={selectedBranchId ?? ''}
+            disabled={isLoadingBranches || branches.length === 0}
+            onChange={(event) => setSelectedBranchId(Number(event.target.value))}
+          >
+            {branches.map((branch) => (
+              <option key={branch.id} value={branch.id}>
+                {branch.name}
+                {branch.isDefault ? ' (default)' : ''}
+              </option>
+            ))}
           </select>
         </label>
-        <button className="primary-button" type="button">
+        <button
+          className="primary-button"
+          type="button"
+          disabled={isComparing || selectedBranchId === null}
+          onClick={() => void handleRunComparison()}
+        >
+          {isComparing ? (
+            <LoaderCircle aria-hidden="true" className="spin" size={16} />
+          ) : null}
           Run Diff Analysis
         </button>
       </div>
 
-      <div className="diff-metrics">
-        <MetricCard label="Changed Files" value="12" />
-        <MetricCard label="Additions" value="+450" tone="positive" />
-        <MetricCard label="Deletions" value="-120" tone="negative" />
-      </div>
+      {branchError ? (
+        <DismissibleAlert title="Branches could not load" onDismiss={() => setBranchError('')}>
+          {branchError}
+        </DismissibleAlert>
+      ) : null}
+      {comparisonError ? (
+        <DismissibleAlert title="Comparison failed" onDismiss={() => setComparisonError('')}>
+          {comparisonError}
+        </DismissibleAlert>
+      ) : null}
 
-      <div className="changed-files">
-        <div className="changed-files__header">Changed Files List</div>
-        <ChangedFile path="src/controllers/PaymentGateway.ts" additions="+120" deletions="-15" />
-        <ChangedFile path="package.json" additions="+2" deletions="-0" />
-      </div>
+      {comparison ? (
+        <>
+          <div className="diff-metrics">
+            <MetricCard
+              label="Changed Files"
+              value={comparison.changedFileCount.toLocaleString()}
+            />
+            <MetricCard
+              label="Additions"
+              value={`+${comparison.additions.toLocaleString()}`}
+              tone="positive"
+            />
+            <MetricCard
+              label="Deletions"
+              value={`-${comparison.deletions.toLocaleString()}`}
+              tone="negative"
+            />
+          </div>
+
+          <div className="changed-files">
+            <div className="changed-files__header">Changed Files List</div>
+            {comparison.changes.length === 0 ? (
+              <p>No changed files between these branches.</p>
+            ) : (
+              comparison.changes.map((change) => (
+                <ChangedFile
+                  key={change.path}
+                  path={change.path}
+                  additions={`+${change.additions}`}
+                  deletions={`-${change.deletions}`}
+                />
+              ))
+            )}
+          </div>
+        </>
+      ) : (
+        <p>Select a branch and run a diff analysis to see changed files.</p>
+      )}
     </div>
   );
 }
